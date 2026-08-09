@@ -1,0 +1,23 @@
+# 실제 매매 데이터와 백업
+*.csv
+backup/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# 도구
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# 편집기 / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

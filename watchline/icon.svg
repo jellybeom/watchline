@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- watchline 아이콘. 배경은 투명하고,
+       선 색은 영웅문 라인색상 16711935(마젠타)와 같다. -->
+  <g fill="#ff00ff">
+    <rect x="28" y="50"  width="200" height="33"/>
+    <rect x="28" y="112" width="200" height="33"/>
+    <rect x="28" y="174" width="200" height="33"/>
+  </g>
+</svg>
