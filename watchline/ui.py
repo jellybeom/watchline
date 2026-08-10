@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QDateEdit,
+    QDialog,
     QFileDialog,
     QHeaderView,
     QLabel,
@@ -37,8 +38,9 @@ from PySide6.QtWidgets import (
     QToolBar,
 )
 
-from . import hlines, watchlist
+from . import hlines, kospi, watchlist
 from .config import settings
+from .kospi_dialog import KospiDialog
 
 # ────────────────────────────── 열 정의 ──────────────────────────────
 
@@ -288,6 +290,7 @@ class MainWindow(QMainWindow):
         self.data: watchlist.Watchlist | None = None
         self.extract: hlines.ExtractResult | None = None
         self.tags: list[str] = watchlist.load_tags(self.cfg.tags_file)
+        self.market = kospi.MarketLog()
         self.cols: list[str] = []
         self.tag_buffer: list[str] | None = None
         self.dirty = False
@@ -295,6 +298,7 @@ class MainWindow(QMainWindow):
         self._check_delegate = CheckDelegate(self)
 
         self._build_ui()
+        self.reload_market(quiet=True)
         self.refresh_lines(quiet=True)
 
         target = initial or (
@@ -323,6 +327,8 @@ class MainWindow(QMainWindow):
         act("저장", "Ctrl+S", self.on_save)
         act("3선 새로고침", "F5", self.on_refresh)
         act("기준봉·태그 가져오기", None, self.on_import_metadata)
+        act("KOSPI 기록", None, self.on_kospi_edit)
+        act("KOSPI 새로고침", "F6", self.on_kospi_refresh)
 
         self.table = Table()
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
@@ -452,6 +458,7 @@ class MainWindow(QMainWindow):
         self.refresh_lines()
         if self.data and self.extract:
             self.apply_lines()
+            self.apply_market_tags(quiet=True)
             self.populate()
 
     def apply_lines(self) -> None:
@@ -490,10 +497,66 @@ class MainWindow(QMainWindow):
             self.say(f"    … 외 {len(d.dropped) - 20}건")
 
         self.apply_lines()
+        self.apply_market_tags()
         self.populate()
         self.dirty = False
         self.setWindowTitle(f"관심종목 편집기 — {d.path.name}")
         self.update_overlay()
+
+    def reload_market(self, quiet: bool = False) -> None:
+        """kospi.json을 다시 읽는다."""
+        try:
+            self.market = kospi.load(self.cfg.kospi_file)
+        except ValueError as e:
+            self.market = kospi.MarketLog()
+            self.say(f"[KOSPI] {e}")
+            if not quiet:
+                QMessageBox.critical(self, "KOSPI 기록", str(e))
+            return
+        if not quiet:
+            self.say(f"[KOSPI] {len(self.market)}일 기록")
+        for bad in self.market.skipped:
+            self.say(f"    형식 오류로 건너뜀 — {bad}")
+
+    def apply_market_tags(self, quiet: bool = False) -> None:
+        """기준봉 날짜로 KOSPI 태그를 다시 붙인다."""
+        if not self.data:
+            return
+        s = kospi.apply_market_tags(self.data, self.market, self.tags, self.cfg)
+        if not quiet:
+            self.say(
+                f"[KOSPI] 상승장 {s['up']} / 하락횡보장 {s['down']} "
+                f"/ 기준봉 없음 {s['no_date']} / 기록 없음 {s['no_record']}"
+            )
+            if s["cleared"]:
+                self.say(f"       기록이 없어 태그를 뗀 종목 {s['cleared']}개")
+        return s
+
+    def on_kospi_edit(self) -> None:
+        dlg = KospiDialog(self.market, self.cfg, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        try:
+            kospi.save(dlg.log, self.cfg.kospi_file)
+        except OSError as e:
+            QMessageBox.critical(self, "저장 실패", f"{type(e).__name__}: {e}")
+            return
+        self.market = dlg.log
+        self.say(
+            f"\n[KOSPI] 기록 저장 — {len(self.market)}일 " f"({self.cfg.kospi_file})"
+        )
+        self.on_kospi_refresh(reload_file=False)
+
+    def on_kospi_refresh(self, reload_file: bool = True) -> None:
+        if reload_file:
+            self.reload_market()
+        if not self.data:
+            return
+        s = self.apply_market_tags()
+        self.populate()
+        if s and (s["up"] or s["down"] or s["cleared"]):
+            self.dirty = True
+        self.update_status("  *수정됨" if self.dirty else "")
 
     def on_import_metadata(self) -> None:
         """이전에 저장한 파일에서 기준봉과 태그만 가져온다."""
@@ -721,6 +784,7 @@ class MainWindow(QMainWindow):
 
         if col == DATE_COL:
             row.ref_date = item.text().strip()
+            self.sync_market_tag(r)
         elif col in LINE_COLS:
             value = plain_number(item.text())
             if value is None:
@@ -734,6 +798,23 @@ class MainWindow(QMainWindow):
 
         self.dirty = True
         self.update_status("  *수정됨")
+
+    def sync_market_tag(self, r: int) -> None:
+        """한 행의 KOSPI 태그를 기준봉에 맞춘다."""
+        if not self.data or not self.cols:
+            return
+        row = self.data.rows[r]
+        one = watchlist.Watchlist(self.data.path, self.data.header, [row], [], True)
+        kospi.apply_market_tags(one, self.market, self.tags, self.cfg)
+
+        self._loading = True
+        try:
+            for tag in self.tags:
+                self.table.item(r, self.cols.index(tag)).setCheckState(
+                    Qt.Checked if tag in row.tags else Qt.Unchecked
+                )
+        finally:
+            self._loading = False
 
     def on_cell_clicked(self, r: int, c: int) -> None:
         """태그 열은 체크박스가 아니라 셀 어디를 눌러도 켜지고 꺼진다."""
@@ -811,14 +892,15 @@ class MainWindow(QMainWindow):
 
     def set_today(self, rows: list[int]) -> None:
         today = QDate.currentDate().toString(DATE_FORMAT)
-        c = self.cols.index(DATE_COL)
-        for r in rows:
-            self.table.item(r, c).setText(today)  # itemChanged가 값을 반영한다
+        self._set_dates(rows, today)
 
     def clear_date(self, rows: list[int]) -> None:
+        self._set_dates(rows, "")
+
+    def _set_dates(self, rows: list[int], text: str) -> None:
         c = self.cols.index(DATE_COL)
         for r in rows:
-            self.table.item(r, c).setText("")  # itemChanged가 값을 반영한다
+            self.table.item(r, c).setText(text)  # itemChanged가 값과 태그를 반영한다
 
     def copy_tags(self, r: int) -> None:
         self.tag_buffer = list(self.data.rows[r].tags)
