@@ -30,6 +30,8 @@ TAGS = {
         ("'900290", "900290"),
         ("900290", "900290"),
         ("  '025900 ", "025900"),
+        ("'0015N0", "0015N0"),
+        ("0015n0", "0015N0"),  # 영문 코드는 대문자로 통일
     ],
 )
 def test_normalize_code(raw, want):
@@ -104,7 +106,7 @@ def test_roundtrip_is_byte_identical(tmp_path, sample_output):
     """읽고 그대로 저장하면 원본과 바이트 단위로 같아야 한다."""
     work = tmp_path / "rt.csv"
     shutil.copy(sample_output, work)
-    W.save(W.load(work), backup=False)
+    W.save(W.load(work))
     assert work.read_bytes() == sample_output.read_bytes()
 
 
@@ -118,45 +120,35 @@ def test_input_to_output_matches_example(tmp_path, sample_input, sample_output):
     for row in wl.rows:
         row.ref_date = DATES[row.code]
         row.tags = TAGS.get(row.code, [])
-    W.save(wl, backup=False)
+    W.save(wl)
 
     assert work.read_bytes() == sample_output.read_bytes()
 
 
-def _cfg(tmp_path, **over):
-    import dataclasses
+def test_save_to_new_path(tmp_path, sample_input):
+    """다른 이름으로 저장하면 원본은 남고 경로가 새 파일로 바뀐다."""
+    src = tmp_path / "today.csv"
+    shutil.copy(sample_input, src)
+    before = src.read_bytes()
 
-    from watchline import config
+    wl = W.load(src)
+    wl.rows[0].ref_date = "2026-08-07"
+    dst = tmp_path / "sub" / "복사본.csv"
+    saved = W.save(wl, dst)
 
-    return dataclasses.replace(config.settings, backup_dir=tmp_path / "bak", **over)
-
-
-def test_backup_goes_to_configured_dir(tmp_path, sample_input):
-    """관심종목 파일이 어디에 있든 백업은 설정된 폴더에 모인다."""
-    far = tmp_path / "desktop"
-    far.mkdir()
-    work = far / "w.csv"
-    shutil.copy(sample_input, work)
-    before = work.read_bytes()
-
-    bak = W.save(W.load(work), cfg=_cfg(tmp_path))
-    assert bak is not None and bak.exists()
-    assert bak.read_bytes() == before  # 백업은 저장 직전 상태
-    assert bak.parent == tmp_path / "bak"
-    assert not (far / "backup").exists()  # 원본 옆에는 만들지 않는다
+    assert saved == dst and dst.exists()
+    assert src.read_bytes() == before  # 원본 불변
+    assert wl.path == dst  # 이후 저장은 새 경로로
+    assert W.load(dst).rows[0].ref_date == "2026-08-07"
 
 
-def test_backup_pruned_to_keep_limit(tmp_path, sample_input):
-    cfg = _cfg(tmp_path, backup_keep=3)
+def test_save_without_path_uses_current(tmp_path, sample_input):
     work = tmp_path / "w.csv"
     shutil.copy(sample_input, work)
-
-    for i in range(5):
-        wl = W.load(work)
-        wl.rows[0].ref_date = f"2026-08-0{i + 1}"
-        W.save(wl, cfg=cfg)
-    made = list((tmp_path / "bak").glob("w_*.csv"))
-    assert len(made) == 3, f"보관 한도 초과/미달: {[p.name for p in made]}"
+    wl = W.load(work)
+    wl.rows[0].ref_date = "2026-08-07"
+    assert W.save(wl) == work
+    assert W.load(work).rows[0].ref_date == "2026-08-07"
 
 
 def test_save_failure_leaves_original(tmp_path, monkeypatch, sample_output):
@@ -169,7 +161,7 @@ def test_save_failure_leaves_original(tmp_path, monkeypatch, sample_output):
 
     monkeypatch.setattr("os.replace", boom)
     with pytest.raises(OSError):
-        W.save(W.load(work), backup=False)
+        W.save(W.load(work))
     assert work.read_bytes() == before
     assert not list(tmp_path.glob("*.tmp"))
 

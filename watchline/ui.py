@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QEvent, QObject, QPointF, QRect, Qt
@@ -33,9 +34,12 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStyle,
     QStyledItemDelegate,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 
 from . import hlines, kospi, watchlist
@@ -113,6 +117,16 @@ QMenu::item {{ padding: 6px 24px; }}
 QMenu::item:selected {{ background: {C_ACCENT}; color: #ffffff; }}
 QMenu::item:disabled {{ color: {C_DIM}; }}
 QSplitter::handle {{ background: {C_GRID}; height: 2px; }}
+QTabBar {{ background: {C_WINDOW}; }}
+QTabBar::tab {{
+    background: {C_WINDOW}; color: {C_DIM};
+    padding: 5px 12px; margin-right: 2px;
+    border: 1px solid {C_GRID}; border-bottom: 0;
+    border-top-left-radius: 4px; border-top-right-radius: 4px;
+}}
+QTabBar::tab:selected {{ background: {C_HEADER}; color: {C_TEXT}; }}
+QTabBar::tab:hover {{ color: {C_TEXT}; }}
+QTabBar::close-button {{ subcontrol-position: right; }}
 """
 
 OVERLAY_IDLE = f"""
@@ -209,6 +223,18 @@ class DateDelegate(QStyledItemDelegate):
         model.setData(index, text, Qt.EditRole)
 
 
+@dataclass
+class Doc:
+    """열려 있는 관심종목 파일 하나."""
+
+    data: watchlist.Watchlist
+    dirty: bool = False
+
+    @property
+    def name(self) -> str:
+        return self.data.path.name
+
+
 class CheckDelegate(QStyledItemDelegate):
     """태그 열의 체크 표시를 셀 가운데에 직접 그린다.
 
@@ -287,14 +313,14 @@ class MainWindow(QMainWindow):
         self.resize(1360, 800)
 
         self.cfg = settings
-        self.data: watchlist.Watchlist | None = None
+        self.docs: list[Doc] = []
         self.extract: hlines.ExtractResult | None = None
         self.tags: list[str] = watchlist.load_tags(self.cfg.tags_file)
         self.market = kospi.MarketLog()
         self.cols: list[str] = []
         self.tag_buffer: list[str] | None = None
-        self.dirty = False
         self._loading = False
+        self._switching = False
         self._check_delegate = CheckDelegate(self)
 
         self._build_ui()
@@ -306,6 +332,32 @@ class MainWindow(QMainWindow):
         )
         if target:
             self.open_file(target)
+
+    # ───────────────────── 현재 문서 접근 ─────────────────────
+
+    @property
+    def doc(self) -> Doc | None:
+        i = self.tabs.currentIndex()
+        return self.docs[i] if 0 <= i < len(self.docs) else None
+
+    @property
+    def data(self) -> watchlist.Watchlist | None:
+        d = self.doc
+        return d.data if d else None
+
+    @property
+    def dirty(self) -> bool:
+        d = self.doc
+        return bool(d and d.dirty)
+
+    @dirty.setter
+    def dirty(self, value: bool) -> None:
+        d = self.doc
+        if d is None or d.dirty == value:
+            return
+        d.dirty = value
+        self.refresh_tab(self.tabs.currentIndex())
+        self.refresh_title()
 
     # ────────────────────────── UI 구성 ──────────────────────────
 
@@ -335,6 +387,15 @@ class MainWindow(QMainWindow):
         act("KOSPI 기록", None, self.on_kospi_edit)
         act("KOSPI 새로고침", "F6", self.on_kospi_refresh)
 
+        self.tabs = QTabBar()
+        self.tabs.setExpanding(False)
+        self.tabs.setMovable(True)
+        self.tabs.setTabsClosable(True)
+        self.tabs.setDrawBase(False)
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+        self.tabs.tabCloseRequested.connect(self.on_tab_close)
+        self.tabs.hide()
+
         self.table = Table()
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setAlternatingRowColors(False)  # 배경은 직접 칠한다
@@ -357,8 +418,15 @@ class MainWindow(QMainWindow):
         self.log.setMaximumBlockCount(2000)
         self.log.setFont(QFont("Consolas", 9))
 
+        top = QWidget()
+        lay = QVBoxLayout(top)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self.tabs)
+        lay.addWidget(self.table, 1)
+
         split = QSplitter(Qt.Vertical)
-        split.addWidget(self.table)
+        split.addWidget(top)
         split.addWidget(self.log)
         split.setSizes([600, 170])
         self.setCentralWidget(split)
@@ -382,14 +450,17 @@ class MainWindow(QMainWindow):
             self.overlay.setGeometry(self.table.rect().adjusted(12, 12, -12, -12))
         return super().eventFilter(obj, event)
 
-    def update_overlay(self, dragging: bool = False) -> None:
+    def update_overlay(self, dragging: bool = False, count: int = 1) -> None:
         """파일이 없거나 드래그 중일 때 안내판을 보여준다."""
         if dragging:
-            self.overlay.setText("여기에 놓으면 파일을 엽니다")
+            what = f"{count}개 파일" if count > 1 else "파일"
+            more = "을 탭으로 추가합니다" if self.docs else "을 엽니다"
+            self.overlay.setText(f"여기에 놓으면 {what}{more}")
             self.overlay.setStyleSheet(OVERLAY_ACTIVE)
         elif self.data is None:
             self.overlay.setText(
-                "관심종목 CSV 파일을 이곳으로 끌어다 놓으세요\n\n또는 Ctrl+O"
+                "관심종목 CSV 파일을 이곳으로 끌어다 놓으세요\n"
+                "여러 개를 한 번에 놓아도 됩니다\n\n또는 Ctrl+O"
             )
             self.overlay.setStyleSheet(OVERLAY_IDLE)
         else:
@@ -400,22 +471,24 @@ class MainWindow(QMainWindow):
         self.overlay.show()
 
     @staticmethod
-    def csv_from_mime(md) -> str | None:
-        """끌어온 것 중 첫 번째 CSV 경로를 돌려준다."""
+    def csv_paths_from_mime(md) -> list[str]:
+        """끌어온 것 중 CSV 경로를 순서대로 돌려준다."""
         if md is None or not md.hasUrls():
-            return None
-        for url in md.urls():
-            if url.isLocalFile() and url.toLocalFile().lower().endswith(".csv"):
-                return url.toLocalFile()
-        return None
+            return []
+        return [
+            u.toLocalFile()
+            for u in md.urls()
+            if u.isLocalFile() and u.toLocalFile().lower().endswith(".csv")
+        ]
 
-    def _dropped_csv(self, event) -> str | None:
-        return self.csv_from_mime(event.mimeData())
+    def _dropped_csv(self, event) -> list[str]:
+        return self.csv_paths_from_mime(event.mimeData())
 
     def dragEnterEvent(self, event):  # noqa: N802
-        if self._dropped_csv(event):
+        paths = self._dropped_csv(event)
+        if paths:
             event.acceptProposedAction()
-            self.update_overlay(dragging=True)
+            self.update_overlay(dragging=True, count=len(paths))
         else:
             event.ignore()
 
@@ -427,11 +500,11 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def dropEvent(self, event):  # noqa: N802
-        path = self._dropped_csv(event)
+        paths = self._dropped_csv(event)
         self.update_overlay()
-        if path:
+        if paths:
             event.acceptProposedAction()
-            self.open_file(path)
+            self.open_files(paths)
         else:
             event.ignore()
 
@@ -469,52 +542,141 @@ class MainWindow(QMainWindow):
 
     def on_refresh(self) -> None:
         self.refresh_lines()
-        if self.data and self.extract:
+        if self.docs and self.extract:
             self.apply_lines()
             self.apply_market_tags(quiet=True)
             self.populate()
 
     def apply_lines(self) -> None:
-        if not (self.data and self.extract):
+        """열려 있는 모든 파일에 3선을 반영한다."""
+        if not self.extract:
             return
-        s = watchlist.apply_lines(self.data, self.extract.lines)
+        total = dict(filled=0, kept=0, blank=0)
+        for doc in self.docs:
+            s = watchlist.apply_lines(doc.data, self.extract.lines)
+            for k in total:
+                total[k] += s[k]
         self.say(
-            f"[적용] 갱신 {s['filled']} / 기존유지 {s['kept']} / 미확보 {s['blank']}"
+            f"[적용] 갱신 {total['filled']} / 기존유지 {total['kept']} "
+            f"/ 미확보 {total['blank']}"
         )
 
     # ─────────────────────────── 파일 ───────────────────────────
 
     def on_open(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self, "관심종목 CSV 열기", "", "CSV 파일 (*.csv);;모든 파일 (*)"
         )
-        if path:
-            self.open_file(path)
+        self.open_files(paths)
 
-    def open_file(self, path: str) -> None:
+    def open_files(self, paths: list[str]) -> None:
+        opened = [p for p in paths if self.open_file(p, switch=False)]
+        if opened:
+            self.tabs.setCurrentIndex(len(self.docs) - 1)
+        if len(opened) > 1:
+            self.say(f"[열기] {len(opened)}개 파일을 불러왔습니다.")
+
+    def open_file(self, path: str, switch: bool = True) -> bool:
+        """파일 하나를 탭으로 연다. 이미 열려 있으면 그 탭으로 이동한다."""
+        target = Path(path).resolve()
+        for i, doc in enumerate(self.docs):
+            if doc.data.path.resolve() == target:
+                self.tabs.setCurrentIndex(i)
+                self.say(f"[열기] 이미 열려 있습니다 — {target.name}")
+                return False
+
         try:
-            self.data = watchlist.load(path)
+            data = watchlist.load(path)
         except Exception as e:
-            QMessageBox.critical(self, "열기 실패", f"{type(e).__name__}: {e}")
+            QMessageBox.critical(
+                self, "열기 실패", f"{Path(path).name}\n\n" f"{type(e).__name__}: {e}"
+            )
+            return False
+
+        self.say(f"\n[열기] {data.path}")
+        self.say(
+            f"       종목 {len(data.rows)}개, 제외된 행 {len(data.dropped)}개"
+            + ("  (기존 입력값 유지)" if data.had_extra_cols else "")
+        )
+        for lineno, why in data.dropped[:20]:
+            self.say(f"    줄 {lineno}: {why}")
+        if len(data.dropped) > 20:
+            self.say(f"    … 외 {len(data.dropped) - 20}건")
+
+        doc = Doc(data)
+        if self.extract:
+            watchlist.apply_lines(data, self.extract.lines)
+        kospi.apply_market_tags(data, self.market, self.tags, self.cfg)
+
+        self.docs.append(doc)
+        self._switching = True
+        try:
+            i = self.tabs.addTab(doc.name)
+            self.tabs.setTabToolTip(i, str(data.path))
+        finally:
+            self._switching = False
+
+        self.tabs.show()
+        if switch or len(self.docs) == 1:
+            if self.tabs.currentIndex() == i:
+                self.on_tab_changed(i)
+            else:
+                self.tabs.setCurrentIndex(i)
+        self.update_overlay()
+        return True
+
+    # ─────────────────────────── 탭 ───────────────────────────
+
+    def refresh_tab(self, i: int) -> None:
+        if 0 <= i < len(self.docs):
+            doc = self.docs[i]
+            self.tabs.setTabText(i, doc.name + (" *" if doc.dirty else ""))
+
+    def refresh_title(self) -> None:
+        d = self.doc
+        if d is None:
+            self.setWindowTitle("관심종목 편집기")
+        else:
+            self.setWindowTitle(f"관심종목 편집기 — {d.name}{' *' if d.dirty else ''}")
+
+    def on_tab_changed(self, i: int) -> None:
+        if self._switching:
+            return
+        if self.doc is None:
+            self.table.clear()
+            self.table.setRowCount(0)
+            self.table.setColumnCount(0)
+            self.cols = []
+        else:
+            self.populate()
+        self.refresh_title()
+        self.update_overlay()
+
+    def on_tab_close(self, i: int) -> None:
+        if not (0 <= i < len(self.docs)):
+            return
+        doc = self.docs[i]
+        if (
+            doc.dirty
+            and QMessageBox.question(
+                self,
+                "저장하지 않은 변경",
+                f"{doc.name}에 저장하지 않은 변경이 있습니다.\n그대로 닫을까요?",
+            )
+            != QMessageBox.Yes
+        ):
             return
 
-        d = self.data
-        self.say(f"\n[열기] {d.path}")
-        self.say(
-            f"       종목 {len(d.rows)}개, 제외된 행 {len(d.dropped)}개"
-            + ("  (기존 입력값 유지)" if d.had_extra_cols else "")
-        )
-        for lineno, why in d.dropped[:20]:
-            self.say(f"    줄 {lineno}: {why}")
-        if len(d.dropped) > 20:
-            self.say(f"    … 외 {len(d.dropped) - 20}건")
+        self._switching = True
+        try:
+            self.docs.pop(i)
+            self.tabs.removeTab(i)
+        finally:
+            self._switching = False
 
-        self.apply_lines()
-        self.apply_market_tags()
-        self.populate()
-        self.dirty = False
-        self.setWindowTitle(f"관심종목 편집기 — {d.path.name}")
-        self.update_overlay()
+        if not self.docs:
+            self.tabs.hide()
+        self.on_tab_changed(self.tabs.currentIndex())
 
     def reload_market(self, quiet: bool = False) -> None:
         """kospi.json을 다시 읽는다."""
@@ -531,11 +693,15 @@ class MainWindow(QMainWindow):
         for bad in self.market.skipped:
             self.say(f"    형식 오류로 건너뜀 — {bad}")
 
-    def apply_market_tags(self, quiet: bool = False) -> None:
-        """기준봉 날짜로 KOSPI 태그를 다시 붙인다."""
-        if not self.data:
-            return
-        s = kospi.apply_market_tags(self.data, self.market, self.tags, self.cfg)
+    def apply_market_tags(self, quiet: bool = False) -> dict | None:
+        """열려 있는 모든 파일에 KOSPI 태그를 다시 붙인다."""
+        if not self.docs:
+            return None
+        s = dict(up=0, down=0, no_date=0, no_record=0, cleared=0)
+        for doc in self.docs:
+            one = kospi.apply_market_tags(doc.data, self.market, self.tags, self.cfg)
+            for k in s:
+                s[k] += one[k]
         if not quiet:
             self.say(
                 f"[KOSPI] 상승장 {s['up']} / 하락횡보장 {s['down']} "
@@ -563,12 +729,16 @@ class MainWindow(QMainWindow):
     def on_kospi_refresh(self, reload_file: bool = True) -> None:
         if reload_file:
             self.reload_market()
-        if not self.data:
+        if not self.docs:
             return
         s = self.apply_market_tags()
         self.populate()
         if s and (s["up"] or s["down"] or s["cleared"]):
-            self.dirty = True
+            for doc in self.docs:
+                doc.dirty = True
+            for i in range(len(self.docs)):
+                self.refresh_tab(i)
+            self.refresh_title()
         self.update_status("  *수정됨" if self.dirty else "")
 
     def on_import_metadata(self) -> None:
@@ -625,6 +795,7 @@ class MainWindow(QMainWindow):
         self.update_status("  *수정됨" if self.dirty else "")
 
     def on_save(self) -> None:
+        """항상 저장 위치를 묻는다. 같은 이름을 고르면 덮어쓴다."""
         if not self.data:
             return
         empty = [r.name or r.code for r in self.data.rows if not r.ref_date]
@@ -641,39 +812,42 @@ class MainWindow(QMainWindow):
             ):
                 return
 
-        if (
-            QMessageBox.question(
-                self,
-                "덮어쓰기 확인",
-                f"아래 파일을 덮어씁니다.\n\n{self.data.path}\n\n"
-                f"종목 {len(self.data.rows)}개\n"
-                f"저장 직전 사본이 backup 폴더에 남습니다.\n\n계속할까요?",
-            )
-            != QMessageBox.Yes
-        ):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "다른 이름으로 저장",
+            str(self.data.path),
+            "CSV 파일 (*.csv);;모든 파일 (*)",
+        )
+        if not path:
             return
 
         try:
-            bak = watchlist.save(self.data, cfg=self.cfg)
+            saved = watchlist.save(self.data, path)
         except Exception as e:
             QMessageBox.critical(
-                self, "저장 실패", f"원본은 그대로입니다.\n\n{type(e).__name__}: {e}"
+                self,
+                "저장 실패",
+                f"대상 파일은 그대로입니다.\n\n{type(e).__name__}: {e}",
             )
             return
 
-        self.say(f"[저장] {self.data.path}  ({len(self.data.rows)}종목)")
-        if bak:
-            self.say(f"       백업: {bak}")
+        self.say(f"[저장] {saved}  ({len(self.data.rows)}종목)")
         self.dirty = False
+        self.refresh_tab(self.tabs.currentIndex())
+        self.refresh_title()
         self.update_status()
 
     def closeEvent(self, event):  # noqa: N802
+        unsaved = [d.name for d in self.docs if d.dirty]
         if (
-            self.dirty
+            unsaved
             and QMessageBox.question(
                 self,
                 "저장하지 않은 변경",
-                "저장하지 않은 변경이 있습니다. 그대로 닫을까요?",
+                f"저장하지 않은 파일이 {len(unsaved)}개 있습니다.\n"
+                + ", ".join(unsaved[:6])
+                + (" …" if len(unsaved) > 6 else "")
+                + "\n\n그대로 닫을까요?",
             )
             != QMessageBox.Yes
         ):

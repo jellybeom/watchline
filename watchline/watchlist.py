@@ -14,13 +14,11 @@ from __future__ import annotations
 import csv
 import os
 import re
-import shutil
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
-from .config import Settings, settings
+from .config import settings
 
 ENCODING = "cp949"
 EXTRA_COLS = ["1선", "2선", "3선", "기준봉", "태그"]
@@ -72,8 +70,8 @@ class Watchlist:
 
 
 def normalize_code(raw: str) -> str:
-    """선행 어퍼스트로피를 제거한다. 예: 900290"""
-    return raw.strip().lstrip("'").strip()
+    """선행 어퍼스트로피를 떼고 대문자로 통일한다. 예: 0015N0"""
+    return raw.strip().lstrip("'").strip().upper()
 
 
 def parse_tags(cell: str) -> list[str]:
@@ -161,34 +159,12 @@ def load(path: str | Path) -> Watchlist:
 # ────────────────────────────── 쓰기 ──────────────────────────────
 
 
-def make_backup(path: Path, bdir: Path, keep: int) -> Path | None:
-    """지정한 폴더에 타임스탬프 사본을 남기고 오래된 것을 지운다."""
-    if not path.exists():
-        return None
-    bdir.mkdir(parents=True, exist_ok=True)
+def save(wl: Watchlist, path: str | Path | None = None) -> Path:
+    """지정한 경로에 저장한다. 경로를 주지 않으면 현재 경로에 쓴다.
 
-    stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
-    dst = bdir / f"{path.stem}_{stamp}{path.suffix}"
-    n = 1
-    while dst.exists():  # 같은 초에 다시 저장한 경우
-        dst = bdir / f"{path.stem}_{stamp}_{n}{path.suffix}"
-        n += 1
-    shutil.copy2(path, dst)
-
-    for old in sorted(bdir.glob(f"{path.stem}_*{path.suffix}"))[:-keep]:
-        old.unlink(missing_ok=True)
-    return dst
-
-
-def save(
-    wl: Watchlist,
-    path: str | Path | None = None,
-    *,
-    backup: bool = True,
-    cfg: Settings | None = None,
-) -> Path | None:
-    """원본을 덮어쓴다. 반환값은 생성된 백업 경로."""
-    cfg = cfg or settings
+    임시 파일에 먼저 쓰고 교체하므로, 실패해도 대상 파일이 손상되지 않고
+    다른 프로그램이 반쯤 쓰인 파일을 읽는 일도 없다.
+    """
     path = Path(path) if path else wl.path
 
     records = [wl.header + EXTRA_COLS]
@@ -198,8 +174,6 @@ def save(
         rec[code_at] = r.code_raw
         rec += [*r.lines, r.ref_date, format_tags(r.tags)]
         records.append(rec)
-
-    bak = make_backup(path, cfg.backup_dir, cfg.backup_keep) if backup else None
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -212,7 +186,8 @@ def save(
             os.unlink(tmp)
         raise
 
-    return bak
+    wl.path = path
+    return path
 
 
 # ────────────────────────── 태그 목록 설정 ─────────────────────────

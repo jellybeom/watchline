@@ -157,7 +157,8 @@ def extract(cfg: Settings | None = None) -> ExtractResult:
         res.screens[screen] += 1
         if cfg.screen_prefix is not None and screen != cfg.screen_prefix:
             continue
-        by_code[m["code"]].append((screen, entry))
+        # 코드는 대문자로 통일한다. HTS가 소문자로 저장해도 짝이 맞도록.
+        by_code[m["code"].upper()].append((screen, entry))
 
     if not by_code:
         res.error = "조건에 맞는 작도 파일이 없습니다. PERIOD_INDEX를 확인하세요."

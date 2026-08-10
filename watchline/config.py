@@ -40,9 +40,6 @@ class Settings:
     # ── 파일 ──
     tags_file: Path = PROJECT_ROOT / "tags.txt"
     default_csv: Path | None = None  # 실행 시 자동으로 열 CSV
-    # 백업 위치. 관심종목 파일이 바탕화면에 있어도 백업은 프로젝트 안에 모인다.
-    backup_dir: Path = PROJECT_ROOT / "backup"
-    backup_keep: int = 20  # 백업 보관 개수
 
 
 settings = Settings()

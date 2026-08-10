@@ -24,7 +24,6 @@ def make_cfg(root: Path, **over) -> Settings:
         stale_days=30,
         tags_file=root / "tags.txt",
         default_csv=None,
-        backup_keep=20,
     )
     return dataclasses.replace(base, **over)
 

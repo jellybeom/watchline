@@ -1,6 +1,5 @@
-# 실제 매매 데이터와 백업
+# 실제 매매 데이터
 *.csv
-backup/
 
 # Python
 __pycache__/
