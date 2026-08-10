@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QEvent, QObject, QPointF, QRect, Qt
@@ -34,12 +33,9 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStyle,
     QStyledItemDelegate,
-    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
-    QVBoxLayout,
-    QWidget,
 )
 
 from . import hlines, kospi, watchlist
@@ -117,16 +113,6 @@ QMenu::item {{ padding: 6px 24px; }}
 QMenu::item:selected {{ background: {C_ACCENT}; color: #ffffff; }}
 QMenu::item:disabled {{ color: {C_DIM}; }}
 QSplitter::handle {{ background: {C_GRID}; height: 2px; }}
-QTabBar {{ background: {C_WINDOW}; }}
-QTabBar::tab {{
-    background: {C_WINDOW}; color: {C_DIM};
-    padding: 5px 12px; margin-right: 2px;
-    border: 1px solid {C_GRID}; border-bottom: 0;
-    border-top-left-radius: 4px; border-top-right-radius: 4px;
-}}
-QTabBar::tab:selected {{ background: {C_HEADER}; color: {C_TEXT}; }}
-QTabBar::tab:hover {{ color: {C_TEXT}; }}
-QTabBar::close-button {{ subcontrol-position: right; }}
 """
 
 OVERLAY_IDLE = f"""
@@ -223,18 +209,6 @@ class DateDelegate(QStyledItemDelegate):
         model.setData(index, text, Qt.EditRole)
 
 
-@dataclass
-class Doc:
-    """열려 있는 관심종목 파일 하나."""
-
-    data: watchlist.Watchlist
-    dirty: bool = False
-
-    @property
-    def name(self) -> str:
-        return self.data.path.name
-
-
 class CheckDelegate(QStyledItemDelegate):
     """태그 열의 체크 표시를 셀 가운데에 직접 그린다.
 
@@ -313,14 +287,15 @@ class MainWindow(QMainWindow):
         self.resize(1360, 800)
 
         self.cfg = settings
-        self.docs: list[Doc] = []
+        self.data: watchlist.Watchlist | None = None
+        self.sources: list[Path] = []  # 합쳐진 입력 파일들
         self.extract: hlines.ExtractResult | None = None
         self.tags: list[str] = watchlist.load_tags(self.cfg.tags_file)
         self.market = kospi.MarketLog()
         self.cols: list[str] = []
         self.tag_buffer: list[str] | None = None
+        self.dirty = False
         self._loading = False
-        self._switching = False
         self._check_delegate = CheckDelegate(self)
 
         self._build_ui()
@@ -332,32 +307,6 @@ class MainWindow(QMainWindow):
         )
         if target:
             self.open_file(target)
-
-    # ───────────────────── 현재 문서 접근 ─────────────────────
-
-    @property
-    def doc(self) -> Doc | None:
-        i = self.tabs.currentIndex()
-        return self.docs[i] if 0 <= i < len(self.docs) else None
-
-    @property
-    def data(self) -> watchlist.Watchlist | None:
-        d = self.doc
-        return d.data if d else None
-
-    @property
-    def dirty(self) -> bool:
-        d = self.doc
-        return bool(d and d.dirty)
-
-    @dirty.setter
-    def dirty(self, value: bool) -> None:
-        d = self.doc
-        if d is None or d.dirty == value:
-            return
-        d.dirty = value
-        self.refresh_tab(self.tabs.currentIndex())
-        self.refresh_title()
 
     # ────────────────────────── UI 구성 ──────────────────────────
 
@@ -387,15 +336,6 @@ class MainWindow(QMainWindow):
         act("KOSPI 기록", None, self.on_kospi_edit)
         act("KOSPI 새로고침", "F6", self.on_kospi_refresh)
 
-        self.tabs = QTabBar()
-        self.tabs.setExpanding(False)
-        self.tabs.setMovable(True)
-        self.tabs.setTabsClosable(True)
-        self.tabs.setDrawBase(False)
-        self.tabs.currentChanged.connect(self.on_tab_changed)
-        self.tabs.tabCloseRequested.connect(self.on_tab_close)
-        self.tabs.hide()
-
         self.table = Table()
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setAlternatingRowColors(False)  # 배경은 직접 칠한다
@@ -406,27 +346,21 @@ class MainWindow(QMainWindow):
         self.table.cellClicked.connect(self.on_cell_clicked)
         self.table.itemChanged.connect(self.on_item_changed)
 
-        # 표 위에 겹쳐 두는 드롭 안내판
-        self.overlay = QLabel(self.table)
+        # 드롭 안내판. 스크롤바와 머리글을 뺀 뷰포트에 얹어야
+        # 오른쪽·아래 모서리가 잘리지 않는다.
+        self.overlay = QLabel(self.table.viewport())
         self.overlay.setAlignment(Qt.AlignCenter)
         self.overlay.setWordWrap(True)
         self.overlay.hide()
-        self.table.installEventFilter(self)
+        self.table.viewport().installEventFilter(self)
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
         self.log.setFont(QFont("Consolas", 9))
 
-        top = QWidget()
-        lay = QVBoxLayout(top)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addWidget(self.tabs)
-        lay.addWidget(self.table, 1)
-
         split = QSplitter(Qt.Vertical)
-        split.addWidget(top)
+        split.addWidget(self.table)
         split.addWidget(self.log)
         split.setSizes([600, 170])
         self.setCentralWidget(split)
@@ -445,28 +379,34 @@ class MainWindow(QMainWindow):
         """
         return None
 
+    OVERLAY_MARGIN = 14
+
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802
-        if obj is self.table and event.type() == QEvent.Resize:
-            self.overlay.setGeometry(self.table.rect().adjusted(12, 12, -12, -12))
+        if obj is self.table.viewport() and event.type() == QEvent.Resize:
+            self.place_overlay()
         return super().eventFilter(obj, event)
+
+    def place_overlay(self) -> None:
+        m = self.OVERLAY_MARGIN
+        self.overlay.setGeometry(self.table.viewport().rect().adjusted(m, m, -m, -m))
 
     def update_overlay(self, dragging: bool = False, count: int = 1) -> None:
         """파일이 없거나 드래그 중일 때 안내판을 보여준다."""
         if dragging:
             what = f"{count}개 파일" if count > 1 else "파일"
-            more = "을 탭으로 추가합니다" if self.docs else "을 엽니다"
+            more = "을 목록에 더합니다" if self.data else "을 엽니다"
             self.overlay.setText(f"여기에 놓으면 {what}{more}")
             self.overlay.setStyleSheet(OVERLAY_ACTIVE)
         elif self.data is None:
             self.overlay.setText(
                 "관심종목 CSV 파일을 이곳으로 끌어다 놓으세요\n"
-                "여러 개를 한 번에 놓아도 됩니다\n\n또는 Ctrl+O"
+                "여러 개를 놓으면 하나의 목록으로 합쳐집니다\n\n또는 Ctrl+O"
             )
             self.overlay.setStyleSheet(OVERLAY_IDLE)
         else:
             self.overlay.hide()
             return
-        self.overlay.setGeometry(self.table.rect().adjusted(12, 12, -12, -12))
+        self.place_overlay()
         self.overlay.raise_()
         self.overlay.show()
 
@@ -542,7 +482,7 @@ class MainWindow(QMainWindow):
 
     def on_refresh(self) -> None:
         self.refresh_lines()
-        if self.docs and self.extract:
+        if self.data and self.extract:
             self.apply_lines()
             self.apply_market_tags(quiet=True)
             self.populate()
@@ -551,45 +491,61 @@ class MainWindow(QMainWindow):
         """열려 있는 모든 파일에 3선을 반영한다."""
         if not self.extract:
             return
-        total = dict(filled=0, kept=0, blank=0)
-        for doc in self.docs:
-            s = watchlist.apply_lines(doc.data, self.extract.lines)
-            for k in total:
-                total[k] += s[k]
+        if not self.data:
+            return
+        s = watchlist.apply_lines(self.data, self.extract.lines)
         self.say(
-            f"[적용] 갱신 {total['filled']} / 기존유지 {total['kept']} "
-            f"/ 미확보 {total['blank']}"
+            f"[적용] 갱신 {s['filled']} / 기존유지 {s['kept']} "
+            f"/ 미확보 {s['blank']}"
         )
 
     # ─────────────────────────── 파일 ───────────────────────────
 
     def on_open(self) -> None:
+        """새 목록으로 연다. 여러 개를 고르면 하나로 이어붙인다."""
         paths, _ = QFileDialog.getOpenFileNames(
             self, "관심종목 CSV 열기", "", "CSV 파일 (*.csv);;모든 파일 (*)"
         )
-        self.open_files(paths)
+        if paths:
+            self.open_files(paths, append=False)
 
-    def open_files(self, paths: list[str]) -> None:
-        opened = [p for p in paths if self.open_file(p, switch=False)]
-        if opened:
-            self.tabs.setCurrentIndex(len(self.docs) - 1)
-        if len(opened) > 1:
-            self.say(f"[열기] {len(opened)}개 파일을 불러왔습니다.")
+    def open_files(self, paths: list[str], append: bool = True) -> None:
+        """파일들을 읽어 하나의 목록으로 합친다.
 
-    def open_file(self, path: str, switch: bool = True) -> bool:
-        """파일 하나를 탭으로 연다. 이미 열려 있으면 그 탭으로 이동한다."""
+        입력이 몇 개든 결과는 파일 하나이므로, 행을 이어붙이고
+        종목코드가 겹치면 먼저 들어온 쪽을 남긴다.
+        """
+        if not paths:
+            return
+        if not append and self.data and not self.confirm_discard():
+            return
+        if not append:
+            self.data = None
+            self.sources = []
+
+        for path in paths:
+            self.load_into(path)
+
+        if not self.data:
+            return
+        self.apply_lines()
+        self.apply_market_tags()
+        self.populate()
+        self.refresh_title()
+        self.update_overlay()
+
+    def load_into(self, path: str) -> bool:
+        """파일 하나를 읽어 현재 목록에 더한다."""
         target = Path(path).resolve()
-        for i, doc in enumerate(self.docs):
-            if doc.data.path.resolve() == target:
-                self.tabs.setCurrentIndex(i)
-                self.say(f"[열기] 이미 열려 있습니다 — {target.name}")
-                return False
+        if any(p.resolve() == target for p in self.sources):
+            self.say(f"[열기] 이미 불러온 파일입니다 — {target.name}")
+            return False
 
         try:
             data = watchlist.load(path)
         except Exception as e:
             QMessageBox.critical(
-                self, "열기 실패", f"{Path(path).name}\n\n" f"{type(e).__name__}: {e}"
+                self, "열기 실패", f"{Path(path).name}\n\n{type(e).__name__}: {e}"
             )
             return False
 
@@ -603,80 +559,51 @@ class MainWindow(QMainWindow):
         if len(data.dropped) > 20:
             self.say(f"    … 외 {len(data.dropped) - 20}건")
 
-        doc = Doc(data)
-        if self.extract:
-            watchlist.apply_lines(data, self.extract.lines)
-        kospi.apply_market_tags(data, self.market, self.tags, self.cfg)
+        if self.data is None:
+            self.data = data
+        else:
+            st = watchlist.append_watchlist(self.data, data)
+            self.say(
+                f"       이어붙임 {st['added']}종목"
+                + (f", 중복 {st['duplicate']}종목 건너뜀" if st["duplicate"] else "")
+            )
+            if st["dup_codes"]:
+                codes = ", ".join(st["dup_codes"][:10])
+                self.say(
+                    f"       중복 종목코드 — {codes}"
+                    + (" …" if len(st["dup_codes"]) > 10 else "")
+                )
+            if st["col_diff"]:
+                self.say(
+                    f"       [주의] 열 구성이 다릅니다 — {', '.join(st['col_diff'])}"
+                )
+            self.dirty = True
 
-        self.docs.append(doc)
-        self._switching = True
-        try:
-            i = self.tabs.addTab(doc.name)
-            self.tabs.setTabToolTip(i, str(data.path))
-        finally:
-            self._switching = False
-
-        self.tabs.show()
-        if switch or len(self.docs) == 1:
-            if self.tabs.currentIndex() == i:
-                self.on_tab_changed(i)
-            else:
-                self.tabs.setCurrentIndex(i)
-        self.update_overlay()
+        self.sources.append(Path(path))
         return True
 
-    # ─────────────────────────── 탭 ───────────────────────────
-
-    def refresh_tab(self, i: int) -> None:
-        if 0 <= i < len(self.docs):
-            doc = self.docs[i]
-            self.tabs.setTabText(i, doc.name + (" *" if doc.dirty else ""))
-
     def refresh_title(self) -> None:
-        d = self.doc
-        if d is None:
+        if not self.sources:
             self.setWindowTitle("관심종목 편집기")
-        else:
-            self.setWindowTitle(f"관심종목 편집기 — {d.name}{' *' if d.dirty else ''}")
-
-    def on_tab_changed(self, i: int) -> None:
-        if self._switching:
             return
-        if self.doc is None:
-            self.table.clear()
-            self.table.setRowCount(0)
-            self.table.setColumnCount(0)
-            self.cols = []
-        else:
-            self.populate()
-        self.refresh_title()
-        self.update_overlay()
+        name = self.sources[0].name
+        if len(self.sources) > 1:
+            name += f" 외 {len(self.sources) - 1}개"
+        self.setWindowTitle(f"관심종목 편집기 — {name}{' *' if self.dirty else ''}")
 
-    def on_tab_close(self, i: int) -> None:
-        if not (0 <= i < len(self.docs)):
-            return
-        doc = self.docs[i]
-        if (
-            doc.dirty
-            and QMessageBox.question(
+    def confirm_discard(self) -> bool:
+        if not self.dirty:
+            return True
+        return (
+            QMessageBox.question(
                 self,
                 "저장하지 않은 변경",
-                f"{doc.name}에 저장하지 않은 변경이 있습니다.\n그대로 닫을까요?",
+                "저장하지 않은 변경이 있습니다. 새로 열까요?",
             )
-            != QMessageBox.Yes
-        ):
-            return
+            == QMessageBox.Yes
+        )
 
-        self._switching = True
-        try:
-            self.docs.pop(i)
-            self.tabs.removeTab(i)
-        finally:
-            self._switching = False
-
-        if not self.docs:
-            self.tabs.hide()
-        self.on_tab_changed(self.tabs.currentIndex())
+    # ───────────────────────── KOSPI 장 기록 ─────────────────────────
 
     def reload_market(self, quiet: bool = False) -> None:
         """kospi.json을 다시 읽는다."""
@@ -694,14 +621,10 @@ class MainWindow(QMainWindow):
             self.say(f"    형식 오류로 건너뜀 — {bad}")
 
     def apply_market_tags(self, quiet: bool = False) -> dict | None:
-        """열려 있는 모든 파일에 KOSPI 태그를 다시 붙인다."""
-        if not self.docs:
+        """기준봉 날짜로 KOSPI 태그를 다시 붙인다."""
+        if not self.data:
             return None
-        s = dict(up=0, down=0, no_date=0, no_record=0, cleared=0)
-        for doc in self.docs:
-            one = kospi.apply_market_tags(doc.data, self.market, self.tags, self.cfg)
-            for k in s:
-                s[k] += one[k]
+        s = kospi.apply_market_tags(self.data, self.market, self.tags, self.cfg)
         if not quiet:
             self.say(
                 f"[KOSPI] 상승장 {s['up']} / 하락횡보장 {s['down']} "
@@ -729,15 +652,12 @@ class MainWindow(QMainWindow):
     def on_kospi_refresh(self, reload_file: bool = True) -> None:
         if reload_file:
             self.reload_market()
-        if not self.docs:
+        if not self.data:
             return
         s = self.apply_market_tags()
         self.populate()
         if s and (s["up"] or s["down"] or s["cleared"]):
-            for doc in self.docs:
-                doc.dirty = True
-            for i in range(len(self.docs)):
-                self.refresh_tab(i)
+            self.dirty = True
             self.refresh_title()
         self.update_status("  *수정됨" if self.dirty else "")
 
@@ -832,22 +752,18 @@ class MainWindow(QMainWindow):
             return
 
         self.say(f"[저장] {saved}  ({len(self.data.rows)}종목)")
+        self.sources = [saved]
         self.dirty = False
-        self.refresh_tab(self.tabs.currentIndex())
         self.refresh_title()
         self.update_status()
 
     def closeEvent(self, event):  # noqa: N802
-        unsaved = [d.name for d in self.docs if d.dirty]
         if (
-            unsaved
+            self.dirty
             and QMessageBox.question(
                 self,
                 "저장하지 않은 변경",
-                f"저장하지 않은 파일이 {len(unsaved)}개 있습니다.\n"
-                + ", ".join(unsaved[:6])
-                + (" …" if len(unsaved) > 6 else "")
-                + "\n\n그대로 닫을까요?",
+                "저장하지 않은 변경이 있습니다. 그대로 닫을까요?",
             )
             != QMessageBox.Yes
         ):

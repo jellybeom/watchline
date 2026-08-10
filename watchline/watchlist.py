@@ -211,6 +211,33 @@ def load_tags(path: str | Path | None = None) -> list[str]:
     return tags or list(DEFAULT_TAGS)
 
 
+def append_watchlist(base: Watchlist, other: Watchlist) -> dict:
+    """other의 종목 행을 base 뒤에 이어붙인다.
+
+    입력이 여러 개여도 결과는 파일 하나이므로, 종목코드가 겹치면
+    먼저 들어온 쪽을 남기고 건너뛴다. 열 구성은 base를 따른다.
+    """
+    seen = {r.code for r in base.rows}
+    stat: dict = {"added": 0, "duplicate": 0, "dup_codes": [], "col_diff": []}
+
+    only_other = [c for c in other.header if c not in base.header]
+    only_base = [c for c in base.header if c not in other.header]
+    stat["col_diff"] = only_other + only_base
+
+    for row in other.rows:
+        if row.code in seen:
+            stat["duplicate"] += 1
+            stat["dup_codes"].append(row.code)
+            continue
+        seen.add(row.code)
+        base.rows.append(row)
+        stat["added"] += 1
+
+    if other.had_extra_cols:
+        base.had_extra_cols = True
+    return stat
+
+
 def merge_metadata(
     target: Watchlist, source: Watchlist, *, overwrite: bool = False
 ) -> dict[str, int]:

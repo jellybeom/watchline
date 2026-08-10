@@ -259,3 +259,61 @@ def test_merge_counts_unmatched(sample_input, sample_output):
     stat = W.merge_metadata(target, source)
     assert stat["matched"] == 2
     assert stat["unmatched"] == 1
+
+
+# ─────────────────── 여러 파일 이어붙이기 ───────────────────
+
+
+def test_append_merges_rows(sample_input, sample_output):
+    base = W.load(sample_input)
+    other = W.load(sample_output)
+    other.rows = other.rows[:1]
+    other.rows[0].code = "111111"
+    other.rows[0].code_raw = "'111111"
+
+    stat = W.append_watchlist(base, other)
+    assert stat["added"] == 1
+    assert [r.code for r in base.rows] == ["900290", "025900", "010950", "111111"]
+
+
+def test_append_skips_duplicate_codes(sample_input, sample_output):
+    base = W.load(sample_input)
+    stat = W.append_watchlist(base, W.load(sample_output))
+    assert stat["added"] == 0
+    assert stat["duplicate"] == 3
+    assert set(stat["dup_codes"]) == {"900290", "025900", "010950"}
+    assert len(base.rows) == 3  # 먼저 들어온 쪽이 남는다
+
+
+def test_append_keeps_first_values(sample_input, sample_output):
+    """중복 종목은 나중 파일의 값으로 덮이지 않는다."""
+    base = W.load(sample_input)
+    base.rows[0].ref_date = "2026-01-01"
+    W.append_watchlist(base, W.load(sample_output))
+    assert base.rows[0].ref_date == "2026-01-01"
+
+
+def test_append_reports_column_difference(sample_input, sample_output):
+    base = W.load(sample_input)
+    other = W.load(sample_output)
+    other.header = other.header + ["추가열"]
+    stat = W.append_watchlist(base, other)
+    assert "추가열" in stat["col_diff"]
+
+
+def test_merged_list_saves_as_one_file(tmp_path, sample_input, sample_output):
+    """입력이 둘이어도 결과는 파일 하나이며 열 구성은 첫 파일을 따른다."""
+    base = W.load(sample_input)
+    other = W.load(sample_output)
+    for i, r in enumerate(other.rows):
+        r.code = f"90000{i}"
+        r.code_raw = f"'90000{i}"
+    W.append_watchlist(base, other)
+
+    out = tmp_path / "merged.csv"
+    W.save(base, out)
+
+    again = W.load(out)
+    assert len(again.rows) == 6
+    assert again.header == base.header
+    assert again.rows[3].ref_date == "2026-07-31"  # 두 번째 파일의 값 유지
