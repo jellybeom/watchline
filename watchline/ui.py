@@ -310,8 +310,13 @@ class MainWindow(QMainWindow):
     # ────────────────────────── UI 구성 ──────────────────────────
 
     def _build_ui(self) -> None:
-        tb = QToolBar()
+        tb = QToolBar("도구 모음")
         tb.setMovable(False)
+        tb.setFloatable(False)
+        # 툴바 위에서 우클릭하면 QMainWindow가 표시/숨김 메뉴를 띄우는데,
+        # 숨기고 나면 되돌릴 방법이 없다. createPopupMenu에서 함께 막는다.
+        tb.setContextMenuPolicy(Qt.PreventContextMenu)
+        self.toolbar = tb
         self.addToolBar(tb)
 
         def act(text, shortcut, slot):
@@ -363,6 +368,14 @@ class MainWindow(QMainWindow):
 
         self.setAcceptDrops(True)
         self.update_overlay()
+
+    def createPopupMenu(self):  # noqa: N802
+        """툴바 표시/숨김 메뉴를 만들지 않는다.
+
+        기본 메뉴는 툴바를 숨길 수 있는데, 숨기면 그 메뉴를 부를 곳이 사라져
+        프로그램을 다시 켜야만 복구된다.
+        """
+        return None
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802
         if obj is self.table and event.type() == QEvent.Resize:
