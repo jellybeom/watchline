@@ -27,11 +27,15 @@ echo.
 
 REM ── 1. 기록 파일 변경이 있으면 먼저 커밋한다 ──
 REM    커밋하지 않은 변경이 남아 있으면 rebase가 거부되므로 순서가 중요하다.
-git diff --quiet -- kospi.json stock_tags.json
+REM    먼저 add해야 새로 생긴 파일(untracked)도 잡힌다.
+REM    git diff는 추적 중인 파일만 보므로 add 뒤 --cached로 비교한다.
+if exist kospi.json git add kospi.json
+if exist stock_tags.json git add stock_tags.json
+
+git diff --cached --quiet -- kospi.json stock_tags.json
 if errorlevel 1 (
     echo [1/3] 기록 변경 커밋하는 중...
     for /f "delims=" %%d in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set TODAY=%%d
-    git add kospi.json stock_tags.json
     git commit -m "data: !TODAY! 기록 갱신"
     if errorlevel 1 (
         echo [중단] commit에 실패했습니다.
@@ -42,11 +46,12 @@ if errorlevel 1 (
 )
 
 REM ── 2. 기록 외에 커밋 안 된 변경이 남아 있으면 rebase가 막힌다 ──
-git diff --quiet
+REM    작업 트리와 스테이지 양쪽을 본다.
+git diff --quiet && git diff --cached --quiet
 if errorlevel 1 (
     echo.
     echo [중단] 커밋하지 않은 다른 변경이 있습니다. 아래 파일을 먼저 정리하세요.
-    git diff --name-only
+    git status --short
     goto :done
 )
 
