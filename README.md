@@ -293,6 +293,7 @@ watchline/
 ├── pyproject.toml       의존성 및 실행 명령 정의
 ├── run.bat              Windows 실행용
 ├── sync.bat             기록 파일 git 동기화
+├── sync_deck.bat        스트림덱 등 외부 런처용 (새 창으로 실행)
 ├── tags.txt             태그 목록 (수정 가능)
 ├── kospi.json           KOSPI 일별 장 구분 기록
 ├── stock_tags.json      종목별 기준봉·태그 기록
