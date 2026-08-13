@@ -242,3 +242,32 @@ def update_from(
         store.put(row.code, row.ref_date, [t for t in row.tags if t not in mkt])
         stat["written"] += 1
     return stat
+
+
+# ────────────────────────── 여러 PC 동기화 도우미 ──────────────────────────
+
+
+def commit_message(day: str, count: int) -> str:
+    """기록 파일을 커밋할 때 쓸 한 줄.
+
+    코드 커밋(feat/fix)과 구분되도록 data: 접두사를 쓴다.
+    나중에 git log --grep='^data:'로 걸러내기 좋다.
+    """
+    return f"data: {day} 기록 갱신 ({count}종목)"
+
+
+def market_commit_message(day: str, state: str, cfg: Settings | None = None) -> str:
+    """그날의 장 판단을 그대로 커밋 메시지로 쓴다."""
+    cfg = cfg or settings
+    label = (cfg.tag_market_up if state == "up" else cfg.tag_market_down).lstrip("#")
+    return f"data: {day} {label}"
+
+
+def days_since_change(path: Path) -> float | None:
+    """파일이 마지막으로 바뀐 뒤 지난 날수. 없으면 None."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    from datetime import datetime
+
+    return (datetime.now().timestamp() - p.stat().st_mtime) / 86400

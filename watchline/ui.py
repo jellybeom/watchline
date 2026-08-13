@@ -310,6 +310,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.reload_store(quiet=True)
         self.reload_market(quiet=True)
+        self.warn_if_stale()
         self.refresh_lines(quiet=True)
 
         target = initial or (
@@ -673,6 +674,35 @@ class MainWindow(QMainWindow):
         for bad in self.store.skipped:
             self.say(f"    형식 오류로 건너뜀 — {bad}")
 
+    def warn_if_stale(self) -> None:
+        """기록 파일이 오래됐으면 알려준다.
+
+        여러 PC를 오가며 쓸 때 git pull을 잊으면 옛 기록으로 판정이 돌아
+        엉뚱한 태그가 붙는다. 파일을 열기 전에 짚어준다.
+        """
+        limit = self.cfg.stale_record_days
+        old = []
+        for label, path in (
+            ("KOSPI 기록", self.cfg.kospi_file),
+            ("태그 기록", self.cfg.tag_store_file),
+        ):
+            days = tagstore.days_since_change(path)
+            if days is not None and days > limit:
+                old.append(f"{label} {days:.0f}일 전")
+
+        if not old:
+            return
+        self.say(
+            f"[동기화] {' / '.join(old)} — 다른 PC에서 갱신했다면 "
+            f"git pull 후 다시 실행하세요."
+        )
+        QMessageBox.information(
+            self,
+            "기록 확인",
+            f"기록 파일이 오래되었습니다.\n\n{chr(10).join(old)}\n\n"
+            "다른 PC에서 갱신한 내용이 있다면 git pull 후 다시 실행하세요.",
+        )
+
     def apply_tag_store(self, ask: bool = True) -> None:
         """기록과 대조해 기준봉·태그를 정한다. 기준봉 확정이 먼저다."""
         if not self.data:
@@ -764,6 +794,10 @@ class MainWindow(QMainWindow):
         self.say(
             f"\n[KOSPI] 기록 저장 — {len(self.market)}일 " f"({self.cfg.kospi_file})"
         )
+        today = QDate.currentDate().toString(DATE_FORMAT)
+        state = self.market.get(today)
+        if state:
+            self.say(f"[git] {tagstore.market_commit_message(today, state, self.cfg)}")
         self.on_kospi_refresh(reload_file=False)
 
     def on_kospi_refresh(self, reload_file: bool = True) -> None:
@@ -834,6 +868,8 @@ class MainWindow(QMainWindow):
                 )
             )
             self.pending = set()
+            today = QDate.currentDate().toString(DATE_FORMAT)
+            self.say(f"[git] {tagstore.commit_message(today, st['written'])}")
 
         self.say(f"[저장] {saved}  ({len(self.data.rows)}종목)")
         self.sources = [saved]

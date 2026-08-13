@@ -304,3 +304,40 @@ def test_pasted_tags_do_not_carry_market(tmp_path):
 
     assert buffer == ["#상한가"]
     assert wl.rows[1].tags == ["#KOSPI하락횡보장", "#상한가"]
+
+
+# ────────────────────────── 동기화 도우미 ──────────────────────────
+
+
+def test_commit_message_shape():
+    m = tagstore.commit_message("2026-08-13", 102)
+    assert m == "data: 2026-08-13 기록 갱신 (102종목)"
+    assert m.startswith("data:")  # 코드 커밋과 구분되는 접두사
+
+
+def test_market_commit_message():
+    assert (
+        tagstore.market_commit_message("2026-08-13", "up")
+        == "data: 2026-08-13 KOSPI상승장"
+    )
+    assert (
+        tagstore.market_commit_message("2026-08-13", "down")
+        == "data: 2026-08-13 KOSPI하락횡보장"
+    )
+
+
+def test_days_since_change(tmp_path):
+    import os
+    import time
+
+    p = tmp_path / "k.json"
+    p.write_text("{}", encoding="utf-8")
+    assert tagstore.days_since_change(p) < 1
+
+    old = time.time() - 5 * 86400
+    os.utime(p, (old, old))
+    assert 4.9 < tagstore.days_since_change(p) < 5.1
+
+
+def test_days_since_change_missing_file(tmp_path):
+    assert tagstore.days_since_change(tmp_path / "없음.json") is None
