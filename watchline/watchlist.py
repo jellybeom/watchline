@@ -1,8 +1,11 @@
 """영웅문4 관심종목 CSV 읽기/쓰기.
 
 인코딩은 CP949 고정이며, 종목코드가 유효한 행만 남기고
-나머지(BLANK| 등 빈 슬롯, 중복 행)는 버린다.
-저장은 원본 덮어쓰기이므로 백업을 먼저 남기고 원자적으로 교체한다.
+나머지(BLANK| 빈 슬롯, 중복 행)는 버린다.
+
+영웅문 관심종목의 빈칸메모로 넣은 `BLANK|기준봉 2026년 7월 30일` 행은
+구간 표시로 읽는다. 그 아래 종목들은 다음 기준봉 행이 나오거나 파일이
+끝날 때까지 그 날짜를 기준봉으로 갖는다.
 
 태그 셀은 값 자체에 따옴표를 포함한다(예: 큰따옴표로 감싼 #A, #B).
 CSV로 기록될 때 따옴표가 이중으로 이스케이프되어
@@ -16,6 +19,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from .config import settings
@@ -26,6 +30,11 @@ CODE_COL = "종목코드"
 
 CODE_RE = re.compile(r"^[0-9A-Za-z]{6}$")
 TAG_SEP = ", "
+
+# BLANK|기준봉 2026년 7월 30일
+SECTION_RE = re.compile(
+    r"^BLANK\|\s*기준봉\s*(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일"
+)
 
 DEFAULT_TAGS = [
     "#KOSPI상승장",
@@ -67,6 +76,18 @@ class Watchlist:
 
 
 # ──────────────────────────── 값 변환 ────────────────────────────
+
+
+def parse_section_date(cell: str) -> str | None:
+    """구간 표시 행에서 기준봉 날짜를 뽑는다. 아니면 None."""
+    m = SECTION_RE.match((cell or "").strip())
+    if not m:
+        return None
+    y, mo, d = (int(g) for g in m.groups())
+    try:
+        return date(y, mo, d).isoformat()
+    except ValueError:
+        return None
 
 
 def normalize_code(raw: str) -> str:
@@ -120,17 +141,25 @@ def load(path: str | Path) -> Watchlist:
     rows: list[Row] = []
     dropped: list[tuple[int, str]] = []
     seen: dict[str, int] = {}
+    section = ""  # 현재 구간의 기준봉
 
     for lineno, rec in enumerate(reader, start=2):
         if not any(c.strip() for c in rec):
             dropped.append((lineno, "빈 행"))
             continue
 
+        first = (rec[0] if rec else "").strip()
+        section_date = parse_section_date(first)
+        if section_date:
+            section = section_date
+            dropped.append((lineno, f"기준봉 구간 시작 — {section_date}"))
+            continue
+
         d = dict(zip(header, rec, strict=False))
         code = normalize_code(d.get(CODE_COL, ""))
 
         if not CODE_RE.match(code):
-            label = (d.get("종목명") or (rec[0] if rec else "")).strip()
+            label = (d.get("종목명") or first).strip()
             dropped.append(
                 (lineno, f"종목코드 없음/형식 오류 ({label or '내용 없음'})")
             )
@@ -146,9 +175,10 @@ def load(path: str | Path) -> Watchlist:
             code=code,
             code_raw=d.get(CODE_COL, "").strip(),
         )
+        row.ref_date = section  # 구간에서 물려받는다
         if had_extra:
             row.lines = [d.get(c, "").strip() for c in ("1선", "2선", "3선")]
-            row.ref_date = d.get("기준봉", "").strip()
+            row.ref_date = d.get("기준봉", "").strip() or section
             row.tags = parse_tags(d.get("태그", ""))
 
         rows.append(row)
@@ -214,64 +244,39 @@ def load_tags(path: str | Path | None = None) -> list[str]:
 def append_watchlist(base: Watchlist, other: Watchlist) -> dict:
     """other의 종목 행을 base 뒤에 이어붙인다.
 
-    입력이 여러 개여도 결과는 파일 하나이므로, 종목코드가 겹치면
-    먼저 들어온 쪽을 남기고 건너뛴다. 열 구성은 base를 따른다.
+    입력이 여러 개여도 결과는 파일 하나다. 종목코드가 겹치면 기준봉이
+    더 최신인 행을 남기고, 날짜가 같거나 비교할 수 없으면 먼저 들어온
+    쪽을 남긴다. 열 구성은 base를 따른다.
     """
-    seen = {r.code for r in base.rows}
-    stat: dict = {"added": 0, "duplicate": 0, "dup_codes": [], "col_diff": []}
+    at = {r.code: i for i, r in enumerate(base.rows)}
+    stat: dict = {
+        "added": 0,
+        "duplicate": 0,
+        "replaced": 0,
+        "dup_codes": [],
+        "col_diff": [],
+    }
 
     only_other = [c for c in other.header if c not in base.header]
     only_base = [c for c in base.header if c not in other.header]
     stat["col_diff"] = only_other + only_base
 
     for row in other.rows:
-        if row.code in seen:
-            stat["duplicate"] += 1
-            stat["dup_codes"].append(row.code)
+        i = at.get(row.code)
+        if i is None:
+            at[row.code] = len(base.rows)
+            base.rows.append(row)
+            stat["added"] += 1
             continue
-        seen.add(row.code)
-        base.rows.append(row)
-        stat["added"] += 1
+
+        stat["duplicate"] += 1
+        stat["dup_codes"].append(row.code)
+        if row.ref_date > base.rows[i].ref_date:  # 빈 문자열은 항상 과거
+            base.rows[i] = row
+            stat["replaced"] += 1
 
     if other.had_extra_cols:
         base.had_extra_cols = True
-    return stat
-
-
-def merge_metadata(
-    target: Watchlist, source: Watchlist, *, overwrite: bool = False
-) -> dict[str, int]:
-    """이전 파일의 기준봉·태그만 현재 파일로 옮긴다.
-
-    종목코드로 짝을 맞추며, 가격·메모 등 원본 열과 1~3선은 절대 건드리지 않는다.
-    overwrite가 False면 현재 값이 비어 있는 항목만 채운다.
-    """
-    src = {r.code: r for r in source.rows}
-    stat = dict(
-        matched=0, date_filled=0, tags_filled=0, date_kept=0, tags_kept=0, unmatched=0
-    )
-
-    for row in target.rows:
-        other = src.get(row.code)
-        if other is None:
-            stat["unmatched"] += 1
-            continue
-        stat["matched"] += 1
-
-        if other.ref_date:
-            if row.ref_date and not overwrite:
-                stat["date_kept"] += 1
-            elif other.ref_date != row.ref_date:
-                row.ref_date = other.ref_date
-                stat["date_filled"] += 1
-
-        if other.tags:
-            if row.tags and not overwrite:
-                stat["tags_kept"] += 1
-            elif other.tags != row.tags:
-                row.tags = list(other.tags)
-                stat["tags_filled"] += 1
-
     return stat
 
 

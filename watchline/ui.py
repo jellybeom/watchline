@@ -30,16 +30,19 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QSizePolicy,
     QSplitter,
     QStyle,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
+    QWidget,
 )
 
-from . import hlines, kospi, watchlist
+from . import hlines, kospi, tagstore, watchlist
 from .config import settings
+from .conflict_dialog import ConflictDialog
 from .kospi_dialog import KospiDialog
 
 # ────────────────────────────── 열 정의 ──────────────────────────────
@@ -58,6 +61,7 @@ RIGHT_COLS = {"현재가", *LINE_COLS}
 EDIT_GROUP = {DATE_COL}
 
 DATE_FORMAT = "yyyy-MM-dd"
+RELOAD = "\u21bb"  # 새로고침 기호
 ICON_PATH = Path(__file__).with_name("icon.ico")
 
 # CheckStateRole은 정수로 돌아오는데 열거형은 int() 변환을 거부하는 판이 있어
@@ -78,6 +82,8 @@ ROW_BG = (QColor("#20242b"), QColor("#262c35"))  # 일반 열 (짝/홀)
 EDIT_BG = (QColor("#1d2831"), QColor("#23303a"))  # 기준봉·태그 열
 WARN_BG = (QColor("#38222a"), QColor("#412833"))  # 경고 행
 WARN_FG = QColor("#ff8181")
+PENDING_BG = (QColor("#3a3320"), QColor("#443c27"))  # 기록 갱신 예정
+PENDING_FG = QColor("#f0c674")
 
 STYLESHEET = f"""
 QMainWindow, QWidget {{ background: {C_WINDOW}; color: {C_TEXT}; }}
@@ -292,6 +298,8 @@ class MainWindow(QMainWindow):
         self.extract: hlines.ExtractResult | None = None
         self.tags: list[str] = watchlist.load_tags(self.cfg.tags_file)
         self.market = kospi.MarketLog()
+        self.store = tagstore.TagStore()
+        self.pending: set[str] = set()  # 기록이 갱신될 예정인 종목
         self.cols: list[str] = []
         self.tag_buffer: list[str] | None = None
         self.dirty = False
@@ -299,6 +307,7 @@ class MainWindow(QMainWindow):
         self._check_delegate = CheckDelegate(self)
 
         self._build_ui()
+        self.reload_store(quiet=True)
         self.reload_market(quiet=True)
         self.refresh_lines(quiet=True)
 
@@ -320,21 +329,39 @@ class MainWindow(QMainWindow):
         self.toolbar = tb
         self.addToolBar(tb)
 
-        def act(text, shortcut, slot):
+        def act(text, shortcut, slot, tip=""):
             a = QAction(text, self)
             if shortcut:
                 a.setShortcut(QKeySequence(shortcut))
-                a.setToolTip(f"{text} ({shortcut})")
+            a.setToolTip(f"{tip or text}" + (f" ({shortcut})" if shortcut else ""))
             a.triggered.connect(slot)
             tb.addAction(a)
             return a
 
+        # 파일 조작은 왼쪽
         act("열기", "Ctrl+O", self.on_open)
         act("저장", "Ctrl+S", self.on_save)
-        act("3선 새로고침", "F5", self.on_refresh)
-        act("기준봉·태그 가져오기", None, self.on_import_metadata)
-        act("KOSPI 기록", None, self.on_kospi_edit)
-        act("KOSPI 새로고침", "F6", self.on_kospi_refresh)
+        act("초기화", None, self.on_reset, "불러온 목록을 모두 비웁니다")
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+
+        # 기록·새로고침은 오른쪽
+        act("KOSPI 기록", None, self.on_kospi_edit, "날짜별 장 구분을 편집합니다")
+        act(f"{RELOAD} 3선", "F5", self.on_refresh, "작도 파일에서 3선을 다시 읽습니다")
+        act(
+            f"{RELOAD} KOSPI",
+            "F6",
+            self.on_kospi_refresh,
+            "kospi.json을 다시 읽어 KOSPI 태그를 붙입니다",
+        )
+        act(
+            f"{RELOAD} 기준봉·태그",
+            "F7",
+            self.on_tags_refresh,
+            "종목별 태그 기록을 다시 대조합니다",
+        )
 
         self.table = Table()
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
@@ -461,11 +488,15 @@ class MainWindow(QMainWindow):
             for r in self.data.rows
             if (s := spread_of(r)) is not None and s >= self.cfg.spread_limit
         )
-        self.status.setText(
-            f"{len(self.data.rows)}종목  |  1~3선 미확보 {missing}  |  "
-            f"분포 {self.cfg.spread_limit * 100:.0f}% 초과 {over}  |  "
-            f"기준봉 미입력 {nodate}{suffix}"
-        )
+        parts = [
+            f"{len(self.data.rows)}종목",
+            f"1~3선 미확보 {missing}",
+            f"분포 {self.cfg.spread_limit * 100:.0f}% 초과 {over}",
+            f"기준봉 미입력 {nodate}",
+        ]
+        if self.pending:
+            parts.append(f"기록 갱신 예정 {len(self.pending)}")
+        self.status.setText("  |  ".join(parts) + suffix)
 
     # ───────────────────────── 수평선 추출 ─────────────────────────
 
@@ -529,7 +560,7 @@ class MainWindow(QMainWindow):
         if not self.data:
             return
         self.apply_lines()
-        self.apply_market_tags()
+        self.apply_tag_store()  # 기준봉 확정 + 태그 복원 + KOSPI 태그
         self.populate()
         self.refresh_title()
         self.update_overlay()
@@ -582,6 +613,25 @@ class MainWindow(QMainWindow):
         self.sources.append(Path(path))
         return True
 
+    def on_reset(self) -> None:
+        """처음 실행한 상태로 되돌린다. 기록 파일은 건드리지 않는다."""
+        if self.data and not self.confirm_discard():
+            return
+        self.data = None
+        self.sources = []
+        self.pending = set()
+        self.dirty = False
+        self.table.clear()
+        self.table.setRowCount(0)
+        self.table.setColumnCount(0)
+        self.cols = []
+        self.log.clear()
+        self.status.setText("파일을 열어주세요.")
+        self.refresh_title()
+        self.update_overlay()
+        self.reload_store(quiet=True)
+        self.reload_market(quiet=True)
+
     def refresh_title(self) -> None:
         if not self.sources:
             self.setWindowTitle("관심종목 편집기")
@@ -602,6 +652,69 @@ class MainWindow(QMainWindow):
             )
             == QMessageBox.Yes
         )
+
+    # ───────────────────────── 종목별 태그 기록 ─────────────────────────
+
+    def reload_store(self, quiet: bool = False) -> None:
+        try:
+            self.store = tagstore.load(self.cfg.tag_store_file)
+        except ValueError as e:
+            self.store = tagstore.TagStore()
+            self.say(f"[태그기록] {e}")
+            if not quiet:
+                QMessageBox.critical(self, "태그 기록", str(e))
+            return
+        if not quiet:
+            self.say(f"[태그기록] {len(self.store)}종목")
+        for bad in self.store.skipped:
+            self.say(f"    형식 오류로 건너뜀 — {bad}")
+
+    def apply_tag_store(self, ask: bool = True) -> None:
+        """기록과 대조해 기준봉·태그를 정한다. 기준봉 확정이 먼저다."""
+        if not self.data:
+            return
+
+        decisions = tagstore.judge(self.data, self.store)
+        conflicts = [d for d in decisions if d.needs_prompt]
+
+        choices: dict[str, bool] = {}
+        if conflicts and ask:
+            dlg = ConflictDialog(conflicts, self)
+            if dlg.exec() == QDialog.Accepted:
+                choices = dlg.choices()
+            else:
+                self.say(
+                    f"[태그기록] 기준봉 확인을 취소했습니다 "
+                    f"— {len(conflicts)}종목은 기록된 날짜를 유지합니다."
+                )
+
+        st = tagstore.apply_decisions(self.data, decisions, choices, self.cfg)
+        self.pending = {
+            d.code for d in decisions if d.verdict is tagstore.Verdict.NEWER
+        }
+        for code, keep in choices.items():
+            if not keep:
+                self.pending.add(code)
+
+        self.say(
+            f"[태그기록] 기록 일치 {st['same']} / 새 종목 {st['new']} "
+            f"/ 기준봉 갱신 {st['newer']} / 확인 필요 {st['older']} "
+            f"/ 기준봉 없음 {st['no_date']}"
+        )
+        if self.pending:
+            self.say(f"       저장 시 기록이 갱신될 종목 {len(self.pending)}개")
+
+        # 기준봉이 확정된 뒤에 KOSPI 태그를 붙인다.
+        self.apply_market_tags(quiet=True)
+
+    def on_tags_refresh(self) -> None:
+        if not self.data:
+            return
+        self.reload_store()
+        self.apply_tag_store()
+        self.populate()
+        self.dirty = True
+        self.refresh_title()
 
     # ───────────────────────── KOSPI 장 기록 ─────────────────────────
 
@@ -661,59 +774,6 @@ class MainWindow(QMainWindow):
             self.refresh_title()
         self.update_status("  *수정됨" if self.dirty else "")
 
-    def on_import_metadata(self) -> None:
-        """이전에 저장한 파일에서 기준봉과 태그만 가져온다."""
-        if not self.data:
-            QMessageBox.information(self, "가져오기", "먼저 관심종목 파일을 여세요.")
-            return
-
-        path, _ = QFileDialog.getOpenFileName(
-            self, "이전 관심종목 CSV 열기", "", "CSV 파일 (*.csv);;모든 파일 (*)"
-        )
-        if not path:
-            return
-        if Path(path) == self.data.path:
-            QMessageBox.warning(self, "가져오기", "지금 열려 있는 파일입니다.")
-            return
-
-        try:
-            source = watchlist.load(path)
-        except Exception as e:
-            QMessageBox.critical(self, "가져오기 실패", f"{type(e).__name__}: {e}")
-            return
-
-        if not source.had_extra_cols:
-            QMessageBox.warning(
-                self,
-                "가져오기",
-                "선택한 파일에 기준봉·태그 열이 없습니다.\n"
-                "이 프로그램으로 저장한 파일을 선택하세요.",
-            )
-            return
-
-        s = watchlist.merge_metadata(self.data, source)
-        if s["date_filled"] or s["tags_filled"]:
-            self.populate()
-            self.dirty = True
-
-        self.say(f"\n[가져오기] {path}")
-        self.say(f"       일치 {s['matched']}종목 / 없는 종목 {s['unmatched']}개")
-        self.say(f"       기준봉 {s['date_filled']}건, 태그 {s['tags_filled']}건 채움")
-        if s["date_kept"] or s["tags_kept"]:
-            self.say(
-                f"       이미 값이 있어 그대로 둠 — "
-                f"기준봉 {s['date_kept']}건, 태그 {s['tags_kept']}건"
-            )
-
-        QMessageBox.information(
-            self,
-            "가져오기 완료",
-            f"기준봉 {s['date_filled']}건, 태그 {s['tags_filled']}건을 채웠습니다.\n"
-            f"이미 값이 있던 항목({s['date_kept'] + s['tags_kept']}건)은 그대로 두었습니다.\n\n"
-            f"가격·메모 등 나머지 정보는 변경되지 않았습니다.",
-        )
-        self.update_status("  *수정됨" if self.dirty else "")
-
     def on_save(self) -> None:
         """항상 저장 위치를 묻는다. 같은 이름을 고르면 덮어쓴다."""
         if not self.data:
@@ -750,6 +810,26 @@ class MainWindow(QMainWindow):
                 f"대상 파일은 그대로입니다.\n\n{type(e).__name__}: {e}",
             )
             return
+
+        st = tagstore.update_from(self.data, self.store, self.cfg)
+        try:
+            tagstore.save(self.store, self.cfg.tag_store_file)
+        except OSError as e:
+            QMessageBox.warning(
+                self,
+                "태그 기록 저장 실패",
+                f"CSV는 저장되었습니다.\n\n{type(e).__name__}: {e}",
+            )
+        else:
+            self.say(
+                f"[태그기록] {st['written']}종목 갱신"
+                + (
+                    f", 기준봉 없어 건너뜀 {st['skipped_no_date']}종목"
+                    if st["skipped_no_date"]
+                    else ""
+                )
+            )
+            self.pending = set()
 
         self.say(f"[저장] {saved}  ({len(self.data.rows)}종목)")
         self.sources = [saved]
@@ -847,6 +927,11 @@ class MainWindow(QMainWindow):
         elif col == DATE_COL:
             it.setText(row.ref_date)
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+            if row.code in self.pending:
+                it.setBackground(QBrush(PENDING_BG[r % 2]))
+                it.setForeground(QBrush(PENDING_FG))
+                it.setToolTip("저장하면 이 기준봉으로 태그 기록이 갱신됩니다.")
+                return it
         elif col in self.tags:
             # 체크 표시는 셀 아무 곳이나 클릭해서 바꾼다(on_cell_clicked).
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -903,12 +988,23 @@ class MainWindow(QMainWindow):
         self.update_status("  *수정됨")
 
     def sync_market_tag(self, r: int) -> None:
-        """한 행의 KOSPI 태그를 기준봉에 맞춘다."""
+        """기준봉을 손으로 고쳤을 때 그 행만 다시 맞춘다.
+
+        KOSPI 태그는 날짜에서 따라오므로 다시 계산하지만, 태그 기록은
+        다시 조회하지 않는다. 조회하면 방금 체크한 태그가 기록된 값으로
+        되돌아가 버린다. 기록 대조는 '기준봉·태그 새로고침'에서만 한다.
+        """
         if not self.data or not self.cols:
             return
         row = self.data.rows[r]
         one = watchlist.Watchlist(self.data.path, self.data.header, [row], [], True)
         kospi.apply_market_tags(one, self.market, self.tags, self.cfg)
+
+        entry = self.store.get(row.code)
+        if row.ref_date and (entry is None or entry.date != row.ref_date):
+            self.pending.add(row.code)
+        else:
+            self.pending.discard(row.code)
 
         self._loading = True
         try:
@@ -916,6 +1012,9 @@ class MainWindow(QMainWindow):
                 self.table.item(r, self.cols.index(tag)).setCheckState(
                     Qt.Checked if tag in row.tags else Qt.Unchecked
                 )
+            self.table.setItem(
+                r, self.cols.index(DATE_COL), self._make_item(row, DATE_COL, r)
+            )
         finally:
             self._loading = False
 

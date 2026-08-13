@@ -201,66 +201,6 @@ def test_load_tags_skips_comments_and_dupes(tmp_path):
     assert W.load_tags(p) == ["#A", "#B"]
 
 
-# ─────────────────── 기준봉·태그 가져오기 ───────────────────
-
-
-def test_merge_copies_only_date_and_tags(sample_input, sample_output):
-    """가격·메모 등 원본 열과 1~3선은 절대 바뀌지 않아야 한다."""
-    target = W.load(sample_input)
-    source = W.load(sample_output)
-
-    W.apply_lines(target, {"900290": (1, 2, 3)})
-    base_before = [dict(r.base) for r in target.rows]
-    lines_before = [list(r.lines) for r in target.rows]
-
-    stat = W.merge_metadata(target, source)
-
-    by = {r.code: r for r in target.rows}
-    assert by["900290"].ref_date == "2026-07-31"
-    assert by["025900"].tags == [
-        "#KOSPI하락횡보장",
-        "#상한가",
-        "#테마주",
-        "#시장을이기는종목",
-    ]
-    assert stat["matched"] == 3
-    assert stat["date_filled"] == 3
-
-    assert [dict(r.base) for r in target.rows] == base_before
-    assert [list(r.lines) for r in target.rows] == lines_before
-
-
-def test_merge_keeps_existing_values(sample_input, sample_output):
-    target = W.load(sample_input)
-    target.rows[0].ref_date = "2026-01-01"
-    target.rows[0].tags = ["#상한가"]
-
-    stat = W.merge_metadata(target, source=W.load(sample_output))
-
-    assert target.rows[0].ref_date == "2026-01-01"  # 사용자가 넣은 값 보존
-    assert target.rows[0].tags == ["#상한가"]
-    assert stat["date_kept"] == 1
-    assert stat["tags_kept"] == 0  # 원본에 태그가 없던 종목
-
-
-def test_merge_overwrite_mode(sample_input, sample_output):
-    target = W.load(sample_input)
-    target.rows[1].ref_date = "2026-01-01"
-
-    W.merge_metadata(target, W.load(sample_output), overwrite=True)
-    assert target.rows[1].ref_date == "2026-08-07"
-
-
-def test_merge_counts_unmatched(sample_input, sample_output):
-    target = W.load(sample_input)
-    source = W.load(sample_output)
-    source.rows = [r for r in source.rows if r.code != "900290"]
-
-    stat = W.merge_metadata(target, source)
-    assert stat["matched"] == 2
-    assert stat["unmatched"] == 1
-
-
 # ─────────────────── 여러 파일 이어붙이기 ───────────────────
 
 
@@ -282,15 +222,24 @@ def test_append_skips_duplicate_codes(sample_input, sample_output):
     assert stat["added"] == 0
     assert stat["duplicate"] == 3
     assert set(stat["dup_codes"]) == {"900290", "025900", "010950"}
-    assert len(base.rows) == 3  # 먼저 들어온 쪽이 남는다
+    assert len(base.rows) == 3
 
 
-def test_append_keeps_first_values(sample_input, sample_output):
-    """중복 종목은 나중 파일의 값으로 덮이지 않는다."""
-    base = W.load(sample_input)
+def test_append_prefers_newer_ref_date(sample_input, sample_output):
+    """중복 종목은 기준봉이 더 최신인 행으로 교체된다."""
+    base = W.load(sample_input)  # 기준봉 없음
     base.rows[0].ref_date = "2026-01-01"
+    other = W.load(sample_output)  # 900290의 기준봉은 2026-07-31
+    stat = W.append_watchlist(base, other)
+    assert base.rows[0].ref_date == "2026-07-31"
+    assert stat["replaced"] == 3  # 빈 기준봉도 과거로 본다
+
+
+def test_append_keeps_first_when_not_newer(sample_input, sample_output):
+    base = W.load(sample_input)
+    base.rows[0].ref_date = "2026-12-31"
     W.append_watchlist(base, W.load(sample_output))
-    assert base.rows[0].ref_date == "2026-01-01"
+    assert base.rows[0].ref_date == "2026-12-31"
 
 
 def test_append_reports_column_difference(sample_input, sample_output):
@@ -317,3 +266,84 @@ def test_merged_list_saves_as_one_file(tmp_path, sample_input, sample_output):
     assert len(again.rows) == 6
     assert again.header == base.header
     assert again.rows[3].ref_date == "2026-07-31"  # 두 번째 파일의 값 유지
+
+
+# ─────────────────── 기준봉 구간(BLANK|기준봉) ───────────────────
+
+
+def _csv(lines: list[str]) -> bytes:
+    return ("\r\n".join(lines) + "\r\n").encode("cp949")
+
+
+HEAD = "분,신,종목명,현재가,등락률,L일봉H,거래대금,메모,종목코드"
+
+
+@pytest.mark.parametrize(
+    ("cell", "want"),
+    [
+        ("BLANK|기준봉 2026년 7월 30일", "2026-07-30"),
+        ("BLANK|기준봉 2026년 8월 3일", "2026-08-03"),
+        ("BLANK|기준봉  2026년 12월 1일", "2026-12-01"),
+        ("BLANK|", None),
+        ("BLANK|기준봉 2026년 13월 1일", None),  # 없는 달
+        ("증", None),
+    ],
+)
+def test_parse_section_date(cell, want):
+    assert W.parse_section_date(cell) == want
+
+
+def test_section_applies_to_following_rows(tmp_path):
+    p = tmp_path / "s.csv"
+    p.write_bytes(
+        _csv(
+            [
+                HEAD,
+                "BLANK|기준봉 2026년 7월 30일,,,,,,,,",
+                '증,,가,"1",1,1 2 3 4,"1",,\'900290',
+                "BLANK|,,,,,,,,",
+                "BLANK|기준봉 2026년 8월 3일,,,,,,,,",
+                '증,,나,"1",1,1 2 3 4,"1",,\'030530',
+                '증,,다,"1",1,1 2 3 4,"1",,\'388720',
+            ]
+        )
+    )
+    wl = W.load(p)
+    assert [(r.code, r.ref_date) for r in wl.rows] == [
+        ("900290", "2026-07-30"),
+        ("030530", "2026-08-03"),
+        ("388720", "2026-08-03"),
+    ]
+
+
+def test_rows_before_any_section_have_no_date(tmp_path):
+    p = tmp_path / "s.csv"
+    p.write_bytes(
+        _csv(
+            [
+                HEAD,
+                '증,,가,"1",1,1 2 3 4,"1",,\'900290',
+                "BLANK|기준봉 2026년 8월 3일,,,,,,,,",
+                '증,,나,"1",1,1 2 3 4,"1",,\'030530',
+            ]
+        )
+    )
+    wl = W.load(p)
+    assert wl.rows[0].ref_date == ""
+    assert wl.rows[1].ref_date == "2026-08-03"
+
+
+def test_existing_date_column_wins_over_section(tmp_path):
+    """이미 저장한 파일을 다시 열면 열의 값이 우선한다."""
+    p = tmp_path / "s.csv"
+    p.write_bytes(
+        _csv(
+            [
+                HEAD + ",1선,2선,3선,기준봉,태그",
+                "BLANK|기준봉 2026년 7월 30일,,,,,,,,,,,,,",
+                '증,,가,"1",1,1 2 3 4,"1",,\'900290,1,2,3,2026-08-05,',
+            ]
+        )
+    )
+    wl = W.load(p)
+    assert wl.rows[0].ref_date == "2026-08-05"

@@ -31,8 +31,9 @@ class Settings:
     price_tolerance: float = 0.01  # 가격이 정수에서 이만큼 벗어나면 경고
     stale_days: int = 30  # 작도 파일이 이보다 오래되면 참고 메모
 
-    # ── KOSPI 장 기록 ──
-    kospi_file: Path = PROJECT_ROOT / "kospi.json"
+    # ── 기록 파일 ──
+    kospi_file: Path = PROJECT_ROOT / "kospi.json"  # 날짜별 장 구분
+    tag_store_file: Path = PROJECT_ROOT / "stock_tags.json"  # 종목별 태그
     tag_market_up: str = "#KOSPI상승장"
     tag_market_down: str = "#KOSPI하락횡보장"
     market_close_hour: int = 20  # 이 시각 이후에 당일 판단을 입력한다
