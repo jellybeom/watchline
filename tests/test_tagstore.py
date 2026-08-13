@@ -272,3 +272,35 @@ def test_full_cycle_round_trip(tmp_path):
     wl2 = make_wl(tmp_path, [("900290", "2026-08-07")])
     tagstore.apply_decisions(wl2, tagstore.judge(wl2, s))
     assert wl2.rows[0].tags == ["#상한가"]
+
+
+# ────────────────── KOSPI 태그는 사용자 편집 대상이 아님 ──────────────────
+
+
+def test_market_tags_helper(tmp_path):
+    from watchline.config import Settings
+
+    cfg = Settings()
+    assert tagstore.market_tags(cfg) == {"#KOSPI상승장", "#KOSPI하락횡보장"}
+
+
+def test_pasted_tags_do_not_carry_market(tmp_path):
+    """다른 종목의 태그를 옮겨도 KOSPI 태그는 각자 기준봉을 따른다."""
+    log = kospi.MarketLog()
+    log.set("2026-08-06", kospi.UP)
+    log.set("2026-08-07", kospi.DOWN)
+
+    wl = make_wl(tmp_path, [("900290", "2026-08-06"), ("005930", "2026-08-07")])
+    kospi.apply_market_tags(wl, log, TAG_ORDER)
+    wl.rows[0].tags = tagstore.order_tags(
+        wl.rows[0].tags + ["#상한가"], tag_order=TAG_ORDER
+    )
+
+    # UI의 붙여넣기와 같은 규칙: KOSPI 태그를 뺀 것만 옮긴다.
+    mkt = tagstore.market_tags()
+    buffer = [t for t in wl.rows[0].tags if t not in mkt]
+    keep = [t for t in wl.rows[1].tags if t in mkt]
+    wl.rows[1].tags = [t for t in TAG_ORDER if t in buffer or t in keep]
+
+    assert buffer == ["#상한가"]
+    assert wl.rows[1].tags == ["#KOSPI하락횡보장", "#상한가"]

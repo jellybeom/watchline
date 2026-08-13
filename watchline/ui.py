@@ -299,6 +299,7 @@ class MainWindow(QMainWindow):
         self.tags: list[str] = watchlist.load_tags(self.cfg.tags_file)
         self.market = kospi.MarketLog()
         self.store = tagstore.TagStore()
+        self.market_tag_set = {self.cfg.tag_market_up, self.cfg.tag_market_down}
         self.pending: set[str] = set()  # 기록이 갱신될 예정인 종목
         self.cols: list[str] = []
         self.tag_buffer: list[str] | None = None
@@ -345,10 +346,12 @@ class MainWindow(QMainWindow):
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # 툴바 배경이 아니라 창 배경이 비치도록 둔다.
+        spacer.setAttribute(Qt.WA_NoSystemBackground)
+        spacer.setStyleSheet("background: transparent;")
         tb.addWidget(spacer)
 
-        # 기록·새로고침은 오른쪽
-        act("KOSPI 기록", None, self.on_kospi_edit, "날짜별 장 구분을 편집합니다")
+        # 새로고침 셋을 붙여 묶고, 성격이 다른 기록 편집은 끝에 둔다.
         act(f"{RELOAD} 3선", "F5", self.on_refresh, "작도 파일에서 3선을 다시 읽습니다")
         act(
             f"{RELOAD} KOSPI",
@@ -362,6 +365,7 @@ class MainWindow(QMainWindow):
             self.on_tags_refresh,
             "종목별 태그 기록을 다시 대조합니다",
         )
+        act("KOSPI 기록", None, self.on_kospi_edit, "날짜별 장 구분을 편집합니다")
 
         self.table = Table()
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
@@ -854,7 +858,12 @@ class MainWindow(QMainWindow):
     # ─────────────────────────── 표 그리기 ───────────────────────────
 
     def is_tag_column(self, col: int) -> bool:
-        return 0 <= col < len(self.cols) and self.cols[col] in self.tags
+        """사용자가 직접 켜고 끌 수 있는 태그 열인지."""
+        return (
+            0 <= col < len(self.cols)
+            and self.cols[col] in self.tags
+            and self.cols[col] not in self.market_tag_set
+        )
 
     def _bg(self, col: str, row_idx: int, warn: bool) -> QColor:
         parity = row_idx % 2
@@ -936,6 +945,12 @@ class MainWindow(QMainWindow):
             # 체크 표시는 셀 아무 곳이나 클릭해서 바꾼다(on_cell_clicked).
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             it.setCheckState(Qt.Checked if col in row.tags else Qt.Unchecked)
+            if col in self.market_tag_set:
+                # 기준봉과 kospi.json에서 자동으로 정해지므로 손으로 못 바꾼다.
+                it.setToolTip(
+                    "KOSPI 태그는 기준봉과 'KOSPI 기록'에서 자동으로 정해집니다."
+                )
+                it.setForeground(QBrush(QColor(C_DIM)))
         elif col == "종목코드":
             it.setText(row.code)  # 선행 어퍼스트로피는 감춘다
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -1105,7 +1120,11 @@ class MainWindow(QMainWindow):
             self.table.item(r, c).setText(text)  # itemChanged가 값과 태그를 반영한다
 
     def copy_tags(self, r: int) -> None:
-        self.tag_buffer = list(self.data.rows[r].tags)
+        # KOSPI 태그는 기준봉에서 따라오므로 복사 대상에서 뺀다.
+        # 함께 옮기면 붙여넣은 종목의 기준봉과 어긋난다.
+        self.tag_buffer = [
+            t for t in self.data.rows[r].tags if t not in self.market_tag_set
+        ]
         name = self.data.rows[r].name or self.data.rows[r].code
         self.say(f"[태그] 복사 — {name}: {', '.join(self.tag_buffer) or '(없음)'}")
 
@@ -1114,7 +1133,8 @@ class MainWindow(QMainWindow):
             return
         for r in rows:
             row = self.data.rows[r]
-            row.tags = [t for t in self.tags if t in self.tag_buffer]
+            keep = [t for t in row.tags if t in self.market_tag_set]
+            row.tags = [t for t in self.tags if t in self.tag_buffer or t in keep]
             self._loading = True
             try:
                 for tag in self.tags:
