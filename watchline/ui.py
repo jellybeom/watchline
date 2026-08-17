@@ -945,6 +945,7 @@ class MainWindow(QMainWindow):
         missing = not row.has_lines
         it = QTableWidgetItem()
         warn = False
+        bg: QColor | None = None  # 기본 배경을 대신할 색
 
         if col in LINE_COLS:
             it.setText(thousands(row.lines[LINE_COLS.index(col)]))
@@ -973,10 +974,9 @@ class MainWindow(QMainWindow):
             it.setText(row.ref_date)
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
             if row.code in self.pending:
-                it.setBackground(QBrush(PENDING_BG[r % 2]))
+                bg = PENDING_BG[r % 2]
                 it.setForeground(QBrush(PENDING_FG))
                 it.setToolTip("저장하면 이 기준봉으로 태그 기록이 갱신됩니다.")
-                return it
         elif col in self.tags:
             # 체크 표시는 셀 아무 곳이나 클릭해서 바꾼다(on_cell_clicked).
             it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -996,7 +996,7 @@ class MainWindow(QMainWindow):
 
         align = Qt.AlignRight if col in RIGHT_COLS else Qt.AlignCenter
         it.setTextAlignment(align | Qt.AlignVCenter)
-        it.setBackground(QBrush(self._bg(col, r, warn)))
+        it.setBackground(QBrush(bg or self._bg(col, r, warn)))
         return it
 
     def _repaint_row(self, r: int) -> None:
