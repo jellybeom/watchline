@@ -37,9 +37,9 @@ class Settings:
     tag_market_up: str = "#KOSPI상승장"
     tag_market_down: str = "#KOSPI하락횡보장"
     market_close_hour: int = 20  # 이 시각 이후에 당일 판단을 입력한다
-    # 기록 파일이 이 일수보다 오래되면 git pull을 잊었는지 알려준다.
-    # 여러 PC에서 번갈아 쓸 때 옛 기록으로 덮어쓰는 사고를 막는다.
-    stale_record_days: int = 3
+    # ── git 동기화 ──
+    project_root: Path = PROJECT_ROOT
+    auto_pull: bool = True  # 시작할 때 원격 기록을 내려받는다
 
     # ── 파일 ──
     tags_file: Path = PROJECT_ROOT / "tags.txt"

@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import hlines, kospi, tagstore, watchlist
+from . import gitsync, hlines, kospi, tagstore, watchlist
 from .config import settings
 from .conflict_dialog import ConflictDialog
 from .kospi_dialog import KospiDialog
@@ -300,6 +300,7 @@ class MainWindow(QMainWindow):
         self.market = kospi.MarketLog()
         self.store = tagstore.TagStore()
         self.market_tag_set = {self.cfg.tag_market_up, self.cfg.tag_market_down}
+        self.sync_ready, self.sync_why = gitsync.available(self.cfg)
         self.pending: set[str] = set()  # 기록이 갱신될 예정인 종목
         self.cols: list[str] = []
         self.tag_buffer: list[str] | None = None
@@ -308,9 +309,11 @@ class MainWindow(QMainWindow):
         self._check_delegate = CheckDelegate(self)
 
         self._build_ui()
+        if self.cfg.auto_pull:
+            self.auto_pull()
         self.reload_store(quiet=True)
         self.reload_market(quiet=True)
-        self.warn_if_stale()
+        self.update_sync_action()
         self.refresh_lines(quiet=True)
 
         target = initial or (
@@ -367,6 +370,9 @@ class MainWindow(QMainWindow):
             "종목별 태그 기록을 다시 대조합니다",
         )
         act("KOSPI 기록", None, self.on_kospi_edit, "날짜별 장 구분을 편집합니다")
+        self.act_sync = act(
+            "기록 동기화", "Ctrl+U", self.on_sync, "기록을 커밋하고 원격에 올립니다"
+        )
 
         self.table = Table()
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
@@ -674,34 +680,54 @@ class MainWindow(QMainWindow):
         for bad in self.store.skipped:
             self.say(f"    형식 오류로 건너뜀 — {bad}")
 
-    def warn_if_stale(self) -> None:
-        """기록 파일이 오래됐으면 알려준다.
+    # ───────────────────────── 기록 동기화 ─────────────────────────
 
-        여러 PC를 오가며 쓸 때 git pull을 잊으면 옛 기록으로 판정이 돌아
-        엉뚱한 태그가 붙는다. 파일을 열기 전에 짚어준다.
+    def auto_pull(self) -> None:
+        """시작할 때 원격 기록을 내려받는다.
+
+        읽기만 하므로 자동으로 돌려도 안전하다. 오프라인이거나 저장소가
+        아니면 조용히 넘어간다. 여기서 막으면 비행기 모드에서 쓸 수 없다.
         """
-        limit = self.cfg.stale_record_days
-        old = []
-        for label, path in (
-            ("KOSPI 기록", self.cfg.kospi_file),
-            ("태그 기록", self.cfg.tag_store_file),
-        ):
-            days = tagstore.days_since_change(path)
-            if days is not None and days > limit:
-                old.append(f"{label} {days:.0f}일 전")
-
-        if not old:
+        if not self.sync_ready:
+            self.say(f"[동기화] 사용할 수 없습니다 — {self.sync_why}")
             return
-        self.say(
-            f"[동기화] {' / '.join(old)} — 다른 PC에서 갱신했다면 "
-            f"git pull 후 다시 실행하세요."
+        res = gitsync.pull(self.cfg)
+        for line in res.lines:
+            self.say(f"[동기화] {line}")
+        if not res.ok:
+            self.say(f"[동기화] 내려받지 못했습니다 — {res.error}")
+            self.say("          기록이 오래되었을 수 있으니 확인하세요.")
+
+    def update_sync_action(self) -> None:
+        """올릴 것이 몇 건인지 버튼에 표시한다."""
+        if not self.sync_ready:
+            self.act_sync.setEnabled(False)
+            self.act_sync.setToolTip(self.sync_why)
+            return
+        n = gitsync.pending_count(self.cfg)
+        self.act_sync.setText(f"기록 동기화 ({n})" if n else "기록 동기화")
+        self.act_sync.setToolTip(
+            f"올릴 기록이 {n}건 있습니다 (Ctrl+U)"
+            if n
+            else "올릴 기록이 없습니다 (Ctrl+U)"
         )
-        QMessageBox.information(
-            self,
-            "기록 확인",
-            f"기록 파일이 오래되었습니다.\n\n{chr(10).join(old)}\n\n"
-            "다른 PC에서 갱신한 내용이 있다면 git pull 후 다시 실행하세요.",
-        )
+
+    def on_sync(self) -> None:
+        if not self.sync_ready:
+            QMessageBox.warning(self, "기록 동기화", self.sync_why)
+            return
+        res = gitsync.push(self.cfg)
+        self.say("")
+        for line in res.lines:
+            self.say(f"[동기화] {line}")
+        if res.ok:
+            self.say("[동기화] 완료되었습니다.")
+        else:
+            self.say(f"[동기화] 실패 — {res.error}")
+            QMessageBox.warning(
+                self, "기록 동기화", f"올리지 못했습니다.\n\n{res.error}"
+            )
+        self.update_sync_action()
 
     def apply_tag_store(self, ask: bool = True) -> None:
         """기록과 대조해 기준봉·태그를 정한다. 기준봉 확정이 먼저다."""
@@ -794,10 +820,7 @@ class MainWindow(QMainWindow):
         self.say(
             f"\n[KOSPI] 기록 저장 — {len(self.market)}일 " f"({self.cfg.kospi_file})"
         )
-        today = QDate.currentDate().toString(DATE_FORMAT)
-        state = self.market.get(today)
-        if state:
-            self.say(f"[git] {tagstore.market_commit_message(today, state, self.cfg)}")
+        self.update_sync_action()
         self.on_kospi_refresh(reload_file=False)
 
     def on_kospi_refresh(self, reload_file: bool = True) -> None:
@@ -868,8 +891,7 @@ class MainWindow(QMainWindow):
                 )
             )
             self.pending = set()
-            today = QDate.currentDate().toString(DATE_FORMAT)
-            self.say(f"[git] {tagstore.commit_message(today, st['written'])}")
+            self.update_sync_action()
 
         self.say(f"[저장] {saved}  ({len(self.data.rows)}종목)")
         self.sources = [saved]
@@ -889,6 +911,28 @@ class MainWindow(QMainWindow):
         ):
             event.ignore()
             return
+
+        # 하루 작업이 끝나는 지점이라 여기서 한 번 묻는 게 가장 덜 성가시다.
+        if self.sync_ready and gitsync.pending_count(self.cfg):
+            answer = QMessageBox.question(
+                self,
+                "기록 동기화",
+                "아직 올리지 않은 기록이 있습니다.\n지금 동기화할까요?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            )
+            if answer == QMessageBox.Cancel:
+                event.ignore()
+                return
+            if answer == QMessageBox.Yes:
+                res = gitsync.push(self.cfg)
+                if not res.ok:
+                    QMessageBox.warning(
+                        self,
+                        "기록 동기화",
+                        f"올리지 못했습니다. 창은 닫지 않습니다.\n\n{res.error}",
+                    )
+                    event.ignore()
+                    return
         event.accept()
 
     # ─────────────────────────── 표 그리기 ───────────────────────────
