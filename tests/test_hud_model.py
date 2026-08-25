@@ -102,8 +102,25 @@ def test_build_view_warns_when_lines_missing(prices):
 
 
 def test_build_view_title_falls_back_to_code():
-    assert m.build_view("067290", [3, 2, 1]).title == "067290"
-    assert m.build_view("067290", [3, 2, 1], name="에스티팜").title == "에스티팜"
+    v = m.build_view("067290", [3, 2, 1])
+    assert v.title == "067290"
+    assert v.has_name is False
+
+
+def test_build_view_uses_name_when_known():
+    v = m.build_view("067290", [3, 2, 1], name="에스티팜")
+    assert v.title == "에스티팜"
+    assert v.has_name is True
+
+
+def test_blank_name_counts_as_unknown():
+    assert m.build_view("067290", [3, 2, 1], name="").has_name is False
+
+
+def test_has_name_works_without_lines():
+    # 선이 부족해 경고 상태여도 제목 규칙은 같다.
+    assert m.build_view("067290", [1], name="에스티팜").has_name is True
+    assert m.build_view("067290", [1]).title == "067290"
 
 
 def test_gaps():

@@ -245,18 +245,20 @@ class HudWindow(QWidget):
     # 각 구획은 다음 구획이 시작할 y를 돌려준다.
 
     def _draw_header(self, p, left, right, y, v: model.View) -> int:
-        p.setFont(_font(11, bold=True))
+        # 이름을 모르면 제목이 곧 코드다. 오른쪽에 또 그리면 같은 글자가
+        # 두 번 찍히므로, 이름이 있을 때만 코드를 곁들인다.
+        p.setFont(_font(11, bold=True, mono=not v.has_name))
         p.setPen(C_TEXT)
-        p.drawText(
-            QRect(left, y, right - left - 60, 18),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            v.title,
-        )
-        p.setFont(_font(8, mono=True))
-        p.setPen(C_DIM)
-        p.drawText(
-            QRect(left, y, right - left, 18), Qt.AlignRight | Qt.AlignVCenter, v.code
-        )
+        title_w = right - left - (60 if v.has_name else 0)
+        p.drawText(QRect(left, y, title_w, 18), Qt.AlignLeft | Qt.AlignVCenter, v.title)
+        if v.has_name:
+            p.setFont(_font(8, mono=True))
+            p.setPen(C_DIM)
+            p.drawText(
+                QRect(left, y, right - left, 18),
+                Qt.AlignRight | Qt.AlignVCenter,
+                v.code,
+            )
         y += 24
 
         if v.spread is None:

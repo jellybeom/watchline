@@ -410,3 +410,47 @@ def test_solid_line_sits_above_dashed_guide(app, env):
     # 3선과 -7% 가이드가 1픽셀 안에 겹쳐 그려져도 예외 없이 그려진다
     render(win)
     win.close()
+
+
+def test_code_is_not_drawn_twice_without_a_name(app, env):
+    """이름을 모를 때 제목과 오른쪽 코드가 같은 글자로 두 번 찍히던 문제."""
+    from watchline.hud_window import CARD_W, PAD
+
+    acct, cfg = env
+    put(acct, "044490", 100_000, 96_500, 91_600)
+    win = HudWindow(cfg)
+    pump()
+    assert win.view.has_name is False
+    assert win.view.title == "044490"
+
+    pm = render(win)
+    card = "#20242b"
+    # 제목 줄의 오른쪽 절반은 비어 있어야 한다
+    row = PAD + 9
+    for dy in range(-6, 7):
+        for x in range(CARD_W // 2 + 20, CARD_W - PAD + 1):
+            assert sample(pm, x, row + dy) == card
+    win.close()
+
+
+def test_code_is_drawn_alongside_a_known_name(app, env):
+    """이름을 알면 오른쪽에 코드를 곁들인다."""
+    from watchline.hud_window import CARD_W, PAD
+
+    acct, cfg = env
+    cfg.names_file.write_text('{"044490": "다이나믹디자인"}', encoding="utf-8")
+    put(acct, "044490", 100_000, 96_500, 91_600)
+    win = HudWindow(cfg)
+    pump()
+    assert win.view.has_name is True
+
+    pm = render(win)
+    card = "#20242b"
+    row = PAD + 9
+    painted = any(
+        sample(pm, x, row + dy) != card
+        for dy in range(-6, 7)
+        for x in range(CARD_W // 2 + 20, CARD_W - PAD + 1)
+    )
+    assert painted  # 코드가 실제로 그려졌다
+    win.close()

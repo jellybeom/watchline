@@ -62,7 +62,12 @@ class View:
         return self.warning is None
 
     @property
+    def has_name(self) -> bool:
+        return bool(self.name)
+
+    @property
     def title(self) -> str:
+        """이름을 모르면 코드가 제목 자리를 대신한다."""
         return self.name or self.code
 
     def gaps(self) -> tuple[float, ...]:
