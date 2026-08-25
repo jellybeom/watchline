@@ -31,9 +31,19 @@ class Settings:
     price_tolerance: float = 0.01  # 가격이 정수에서 이만큼 벗어나면 경고
     stale_days: int = 30  # 작도 파일이 이보다 오래되면 참고 메모
 
+    # ── HUD 창 ──
+    # 1선 기준 가이드선. 위에서 아래 순서로 적는다.
+    hud_guides: tuple[float, ...] = (-7.0, -10.0)
+    # 스트립 하한 계단. 3선이 한 계단을 넘어가면 다음으로 넓힌다.
+    hud_floor_steps: tuple[float, ...] = (-10.0, -15.0, -20.0, -25.0)
+    hud_poll_ms: int = 500  # 작도 폴더를 살피는 주기
+    hud_settle_ms: int = 300  # 변경 감지 후 읽기까지 기다리는 시간
+    hud_retry_ms: int = 300  # 읽기에 실패했을 때 한 번 더 시도하는 간격
+
     # ── 기록 파일 ──
     kospi_file: Path = PROJECT_ROOT / "kospi.json"  # 날짜별 장 구분
     tag_store_file: Path = PROJECT_ROOT / "stock_tags.json"  # 종목별 태그
+    names_file: Path = PROJECT_ROOT / "names.json"  # 종목코드 → 종목명
     tag_market_up: str = "#KOSPI상승장"
     tag_market_down: str = "#KOSPI하락횡보장"
     market_close_hour: int = 20  # 이 시각 이후에 당일 판단을 입력한다

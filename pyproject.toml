@@ -9,6 +9,7 @@ dependencies = ["PySide6>=6.6"]
 [project.scripts]
 watchline = "watchline.ui:main"
 watchline-report = "watchline.cli:main"
+watchline-hud = "watchline.hud_window:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.6"]

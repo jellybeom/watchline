@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QObject, QPointF, QRect, Qt
+from PySide6.QtCore import QDate, QEvent, QObject, QPointF, QProcess, QRect, Qt
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import gitsync, hlines, kospi, tagstore, watchlist
+from . import gitsync, hlines, kospi, names, tagstore, watchlist
 from .config import settings
 from .conflict_dialog import ConflictDialog
 from .kospi_dialog import KospiDialog
@@ -321,7 +321,7 @@ class MainWindow(QMainWindow):
             str(self.cfg.default_csv) if self.cfg.default_csv else None
         )
         if target:
-            self.open_file(target)
+            self.open_files([target], append=False)
 
     # ────────────────────────── UI 구성 ──────────────────────────
 
@@ -371,6 +371,12 @@ class MainWindow(QMainWindow):
             "종목별 태그 기록을 다시 대조합니다",
         )
         act("KOSPI 기록", None, self.on_kospi_edit, "날짜별 장 구분을 편집합니다")
+        act(
+            "3선 간격 창",
+            "F8",
+            self.on_hud,
+            "작도 중인 종목의 1선↔3선 간격을 띄웁니다",
+        )
         self.act_sync = act(
             "기록 동기화", "Ctrl+U", self.on_sync, "기록을 커밋하고 원격에 올립니다"
         )
@@ -542,6 +548,36 @@ class MainWindow(QMainWindow):
             f"/ 미확보 {s['blank']}"
         )
 
+    # ────────────────────────── 3선 간격 창 ──────────────────────────
+
+    def on_hud(self) -> None:
+        """HUD를 별도 프로세스로 띄운다.
+
+        자식 창으로 만들면 편집기를 닫을 때 같이 사라진다. HUD는 편집을
+        끝낸 뒤에도 계속 띄워두는 물건이므로 프로세스를 분리한다.
+        """
+        args = ["-m", "watchline.hud_window"]
+        if QProcess.startDetached(sys.executable, args, str(self.cfg.project_root)):
+            self.say("[HUD] 3선 간격 창을 띄웠습니다.")
+        else:
+            self.say("[HUD] 창을 띄우지 못했습니다.")
+
+    def cache_names(self) -> None:
+        """HUD가 종목명을 쓸 수 있도록 코드↔이름을 저장해 둔다.
+
+        작도 파일에는 종목코드만 있어서, 이름은 여기서만 나온다.
+        실패해도 편집 작업과는 무관하므로 조용히 넘어간다.
+        """
+        if not self.data:
+            return
+        try:
+            added = names.update_from(self.data.rows, self.cfg.names_file)
+        except OSError as e:
+            self.say(f"[이름] 캐시 저장 실패 — {type(e).__name__}: {e}")
+            return
+        if added:
+            self.say(f"[이름] 종목명 {added}개를 캐시에 더했습니다.")
+
     # ─────────────────────────── 파일 ───────────────────────────
 
     def on_open(self) -> None:
@@ -571,6 +607,7 @@ class MainWindow(QMainWindow):
 
         if not self.data:
             return
+        self.cache_names()
         self.apply_lines()
         self.apply_tag_store()  # 기준봉 확정 + 태그 복원 + KOSPI 태그
         self.populate()

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import configparser
 import math
+import os
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -144,7 +145,9 @@ def extract(cfg: Settings | None = None) -> ExtractResult:
     res.account_dir = acct
 
     by_code: dict[str, list[tuple[str, Path]]] = defaultdict(list)
-    for entry in acct.iterdir():
+    # scandir은 디렉터리 항목에서 종류와 시각을 함께 받아오므로
+    # iterdir + is_file + stat 조합보다 파일당 시스템 호출이 적다.
+    for entry in os.scandir(acct):
         if not entry.is_file():
             continue
         m = FILENAME_RE.match(entry.name)
@@ -158,7 +161,7 @@ def extract(cfg: Settings | None = None) -> ExtractResult:
         if cfg.screen_prefix is not None and screen != cfg.screen_prefix:
             continue
         # 코드는 대문자로 통일한다. HTS가 소문자로 저장해도 짝이 맞도록.
-        by_code[m["code"].upper()].append((screen, entry))
+        by_code[m["code"].upper()].append((screen, Path(entry.path)))
 
     if not by_code:
         res.error = "조건에 맞는 작도 파일이 없습니다. PERIOD_INDEX를 확인하세요."
@@ -176,7 +179,9 @@ def extract(cfg: Settings | None = None) -> ExtractResult:
             continue
 
         _, path = entries[0]
-        res.mtimes.append(path.stat().st_mtime)
+        # stat 결과는 아래 stale 계산에서도 쓰므로 한 번만 부른다.
+        mtime = path.stat().st_mtime
+        res.mtimes.append(mtime)
 
         info = read_drawing_file(path, cfg)
         res.types.update(info["types"])
@@ -206,7 +211,7 @@ def extract(cfg: Settings | None = None) -> ExtractResult:
         if len(prices) > cfg.top_n:
             rest = len(prices) - cfg.top_n
             res.notes.append(f"{code}  수평선 {len(prices)}개 중 하위 {rest}개 제외")
-        stale = (now - path.stat().st_mtime) / 86400
+        stale = (now - mtime) / 86400
         if stale > cfg.stale_days:
             res.notes.append(f"{code}  작도 파일이 {stale:.0f}일 전 것")
 
