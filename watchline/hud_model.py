@@ -77,6 +77,16 @@ class View:
             for i in range(len(self.prices) - 1)
         )
 
+    def gap_pairs(self) -> tuple[tuple[str, str], ...]:
+        """이웃한 선 사이 낙폭을 (라벨, 값) 쌍으로 준다.
+
+        한 덩어리 문자열로 그리면 어디까지가 라벨이고 어디부터가 숫자인지
+        구분이 안 된다. 쌍으로 나눠 색과 글꼴을 달리 줄 수 있게 한다.
+        """
+        return tuple(
+            (f"{i + 1}↔{i + 2}", f"{g:.2f}%") for i, g in enumerate(self.gaps())
+        )
+
     def breached(self, guide: float) -> bool:
         """3선이 해당 가이드선 아래(또는 정확히 위)인가."""
         return self.spread is not None and self.spread <= guide

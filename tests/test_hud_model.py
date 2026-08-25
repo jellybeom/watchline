@@ -130,6 +130,20 @@ def test_gaps():
     assert g2 == pytest.approx(-5.0777, abs=1e-3)
 
 
+def test_gap_pairs_splits_label_and_value():
+    v = m.build_view("A", [100_000, 96_500, 91_600])
+    assert v.gap_pairs() == (("1↔2", "-3.50%"), ("2↔3", "-5.08%"))
+
+
+def test_gap_pairs_empty_without_lines():
+    assert m.build_view("A", [100_000]).gap_pairs() == ()
+
+
+def test_gap_pairs_follows_top_n():
+    v = m.build_view("A", [100, 90, 80, 70], top_n=4)
+    assert len(v.gap_pairs()) == 3
+
+
 def test_breached():
     v = m.build_view("A", [100_000, 96_500, 91_600])  # -8.4%
     assert v.breached(-7.0)

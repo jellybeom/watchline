@@ -45,6 +45,7 @@ C_LINE = QColor("#c3ccd8")  # 사용자가 그은 수평선
 C_WARN = QColor("#f0c674")  # -7% 가이드선
 C_DANGER = QColor("#e57373")  # -10% 가이드선
 C_MERGE = QColor("#7fd1b9")  # 수평선과 가이드선이 겹친 줄
+C_SEP = QColor("#5f6875")  # 꼬리 구분점. 눈에 걸리되 숫자와 다투지 않게
 
 GUIDE_COLORS = (C_WARN, C_DANGER)
 
@@ -56,6 +57,8 @@ FOOTER_H = 30  # 구분선 + 이웃 낙폭 줄
 WARN_H = 62  # 선이 부족할 때 스트립 대신 쓰는 높이
 STRIP_BOTTOM_PAD = 12  # 하한 가이드선이 바닥에 묻히지 않도록 남기는 여백
 LABEL_GAP = 18  # 라벨끼리 최소로 벌리는 간격
+GAP_INNER = 4  # 꼬리에서 라벨과 숫자 사이
+GAP_SEP = 16  # 꼬리에서 낙폭 묶음 사이 (가운뎃점 자리)
 RADIUS = 10
 
 
@@ -418,25 +421,64 @@ class HudWindow(QWidget):
         return y + WARN_H
 
     def _draw_footer(self, p, left, right, y, v: model.View) -> None:
-        p.setPen(QPen(C_EDGE, 1))
+        p.setPen(QPen(C_EDGE, 1, Qt.SolidLine, Qt.FlatCap))
         p.drawLine(left, y - 8, right, y - 8)
-        p.setFont(_font(8))
-        p.setPen(C_DIM)
-        gaps = v.gaps()
-        if gaps:
-            text = "  ".join(f"{i + 1}↔{i + 2} {g:.2f}%" for i, g in enumerate(gaps))
-        else:
-            text = self.status or ""
-        p.drawText(
-            QRect(left, y, right - left, 14), Qt.AlignLeft | Qt.AlignVCenter, text
-        )
-        if self.updated_at:
+
+        stamp = self.updated_at.strftime("%H:%M:%S") if self.updated_at else ""
+        row = QRect(left, y, right - left, 14)
+        if stamp:
             p.setFont(_font(8, mono=True))
+            p.setPen(C_DIM)
+            p.drawText(row, Qt.AlignRight | Qt.AlignVCenter, stamp)
+            row.setRight(right - QFontMetrics(p.font()).horizontalAdvance(stamp) - 12)
+
+        pairs = v.gap_pairs()
+        if not pairs:
+            p.setFont(_font(8))
+            p.setPen(C_DIM)
+            p.drawText(row, Qt.AlignLeft | Qt.AlignVCenter, self.status or "")
+            return
+        self._draw_gap_pairs(p, row, pairs)
+
+    def _draw_gap_pairs(self, p, row: QRect, pairs) -> None:
+        """라벨과 숫자를 번갈아 그린다. 자리가 모자라면 그리다 만다."""
+        x = row.left()
+        for i, (label, value) in enumerate(pairs):
+            if i:
+                p.setFont(_font(8))
+                p.setPen(C_SEP)
+                p.drawText(
+                    QRect(x, row.top(), GAP_SEP, row.height()),
+                    Qt.AlignCenter,
+                    "·",
+                )
+                x += GAP_SEP
+
+            p.setFont(_font(8))
+            fm = QFontMetrics(p.font())
+            lw = fm.horizontalAdvance(label)
+            p.setFont(_font(9, mono=True))
+            vw = QFontMetrics(p.font()).horizontalAdvance(value)
+            if x + lw + GAP_INNER + vw > row.right():
+                return  # 시각과 겹치느니 뒤쪽을 생략한다
+
+            p.setFont(_font(8))
+            p.setPen(C_DIM)
             p.drawText(
-                QRect(left, y, right - left, 14),
-                Qt.AlignRight | Qt.AlignVCenter,
-                self.updated_at.strftime("%H:%M:%S"),
+                QRect(x, row.top(), lw, row.height()),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                label,
             )
+            x += lw + GAP_INNER
+
+            p.setFont(_font(9, mono=True))
+            p.setPen(C_TEXT)
+            p.drawText(
+                QRect(x, row.top(), vw, row.height()),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                value,
+            )
+            x += vw
 
     def _draw_text(self, p, x, y, text, color, font) -> None:
         p.setFont(font)

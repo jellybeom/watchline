@@ -511,3 +511,55 @@ def test_lines_do_not_overhang_their_endpoints(app, env):
         for x in (CARD_W - PAD + 1, CARD_W - PAD + 2):
             assert img.pixelColor(x, y).name() == card, f"{m.label} 오른쪽 x={x}"
     win.close()
+
+
+def test_footer_distinguishes_labels_from_numbers(app, env):
+    """라벨과 숫자가 같은 색 한 덩어리로 그려져 구분이 안 되던 문제.
+
+    글자는 안티에일리어싱으로 번지므로 정확한 색을 찾는 대신 밝기로 본다.
+    전부 흐린 색으로 그리면 최대 밝기가 C_DIM 수준을 넘지 못한다.
+    """
+    from watchline.hud_window import C_DIM, C_TEXT, FOOTER_H, PAD
+
+    acct, cfg = env
+    put(acct, "044490", 100_000, 96_500, 91_600)
+    win = HudWindow(cfg)
+    pump()
+    img = transparent_render(win).toImage()
+
+    band_top = win.height() - PAD - FOOTER_H
+    values = [
+        img.pixelColor(x, y).value()
+        for y in range(band_top, win.height() - PAD)
+        for x in range(PAD, win.width() // 2)
+    ]
+    brightest = max(values)
+    assert brightest > C_DIM.value() + 25, "숫자가 라벨과 같은 밝기로 그려졌다"
+    assert brightest <= C_TEXT.value()
+    # 흐린 라벨도 실제로 존재해야 한다
+    assert any(90 < v < C_DIM.value() + 15 for v in values), "라벨 획이 없다"
+    win.close()
+
+
+def test_footer_omits_pairs_that_would_hit_the_timestamp(app, env):
+    """선이 많아 자리가 모자라면 시각과 겹치는 대신 뒤쪽을 생략한다."""
+    from dataclasses import replace as dc_replace
+
+    acct, cfg = env
+    cfg = dc_replace(cfg, top_n=6)
+    put(acct, "044490", 100_000, 98_000, 96_000, 94_000, 92_000, 90_000)
+    win = HudWindow(cfg)
+    pump()
+    assert len(win.view.gap_pairs()) == 5
+    render(win)  # 그리다 죽지 않는다
+    win.close()
+
+
+def test_footer_shows_status_when_no_pairs(app, env):
+    acct, cfg = env
+    put(acct, "044490", 100_000, 96_500)
+    win = HudWindow(cfg)
+    pump()
+    assert win.view.gap_pairs() == ()
+    render(win)
+    win.close()
