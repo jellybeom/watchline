@@ -79,6 +79,10 @@ class HudWindow(QWidget):
         self.setWindowFlags(
             Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         )
+        # 둥근 카드는 paintEvent가 직접 그린다. 이 속성이 없으면 카드 바깥의
+        # 네 모서리가 위젯 기본 배경색으로 남아 각진 자국이 생긴다.
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_NoSystemBackground)
         self.setFixedWidth(CARD_W)
 
         self.view: model.View | None = None
@@ -319,10 +323,14 @@ class HudWindow(QWidget):
         guides = tuple(self.cfg.hud_guides)
         colors = [self._color_of(m, guides) for m in marks]
 
+        # 가로선은 축에 정렬돼 있어 안티에일리어싱으로 얻을 것이 없다.
+        # 켜두면 선 끝이 좌우로 반 픽셀씩 번져, 라벨 뒤를 지워도 왼쪽에
+        # 지워지지 않은 점이 남는다.
+        p.setRenderHint(QPainter.Antialiasing, False)
         for m, y, color in zip(marks, line_ys, colors, strict=True):
             if m.is_line:
                 continue
-            pen = QPen(color, 1.0, Qt.DashLine)
+            pen = QPen(color, 1, Qt.DashLine, Qt.FlatCap)
             pen.setDashPattern([4, 4])
             p.setPen(pen)
             p.drawLine(left, int(top + y), right, int(top + y))
@@ -330,8 +338,11 @@ class HudWindow(QWidget):
         for m, y, color in zip(marks, line_ys, colors, strict=True):
             if not m.is_line:
                 continue
-            p.setPen(QPen(color, 1.4))
+            # FlatCap이 아니면 Qt 기본값인 SquareCap이 선 양 끝을 펜 굵기의
+            # 절반만큼 더 늘려, 라벨 왼쪽에 지워지지 않는 점이 남는다.
+            p.setPen(QPen(color, 2, Qt.SolidLine, Qt.FlatCap))
             p.drawLine(left, int(top + y), right, int(top + y))
+        p.setRenderHint(QPainter.Antialiasing, True)
 
         for m, y, color in zip(marks, label_ys, colors, strict=True):
             self._draw_mark_label(p, left, right, top + y, m, color)

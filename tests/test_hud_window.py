@@ -454,3 +454,60 @@ def test_code_is_drawn_alongside_a_known_name(app, env):
     )
     assert painted  # 코드가 실제로 그려졌다
     win.close()
+
+
+def transparent_render(win) -> QPixmap:
+    """투명 배경 위에 그린다. 창이 칠하지 않은 자리는 알파 0으로 남는다."""
+    from PySide6.QtCore import Qt
+
+    pm = QPixmap(win.size())
+    pm.fill(Qt.transparent)
+    win.render(pm)
+    return pm
+
+
+def test_corners_are_transparent(app, env):
+    """둥근 카드 바깥이 기본 배경색으로 남아 모서리가 각져 보이던 문제.
+
+    offscreen 렌더링만으로는 WA_TranslucentBackground와
+    WA_NoSystemBackground를 구분할 수 없다. 실제 Windows에서 네이티브
+    창을 알파로 만드는 건 앞의 것뿐이므로 속성 자체를 함께 확인한다.
+    """
+    from PySide6.QtCore import Qt
+
+    acct, cfg = env
+    put(acct, "044490", 100_000, 96_500, 91_600)
+    win = HudWindow(cfg)
+    pump()
+
+    assert win.testAttribute(Qt.WA_TranslucentBackground)
+    assert win.testAttribute(Qt.WA_NoSystemBackground)
+
+    img = transparent_render(win).toImage()
+    w, h = win.width(), win.height()
+    for x, y in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
+        assert img.pixelColor(x, y).alpha() == 0, f"모서리 ({x},{y})가 칠해져 있다"
+    assert img.pixelColor(w // 2, h // 2).alpha() == 255  # 카드 안은 불투명
+    win.close()
+
+
+def test_lines_do_not_overhang_their_endpoints(app, env):
+    """펜 마감이 SquareCap이면 선이 양 끝으로 삐져나와 점이 남던 문제."""
+    from watchline import hud_model as model
+    from watchline.hud_window import CARD_W, HEADER_H, LABEL_GAP, PAD, STRIP_H
+
+    acct, cfg = env
+    put(acct, "044490", 100_000, 96_500, 91_600)
+    win = HudWindow(cfg)
+    pump()
+    img = transparent_render(win).toImage()
+
+    line_ys, _ = model.label_ys(win.view.marks, win.view.floor, STRIP_H, LABEL_GAP)
+    card = "#20242b"
+    for m, ly in zip(win.view.marks, line_ys, strict=True):
+        y = int(PAD + HEADER_H + ly)
+        for x in (PAD - 3, PAD - 2, PAD - 1):
+            assert img.pixelColor(x, y).name() == card, f"{m.label} 왼쪽 x={x}"
+        for x in (CARD_W - PAD + 1, CARD_W - PAD + 2):
+            assert img.pixelColor(x, y).name() == card, f"{m.label} 오른쪽 x={x}"
+    win.close()
