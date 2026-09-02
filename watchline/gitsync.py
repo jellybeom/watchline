@@ -10,6 +10,7 @@ git 명령은 순서가 중요하다. 커밋하지 않은 변경이 남아 있�
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -25,9 +26,16 @@ class Result:
     ok: bool
     lines: list[str] = field(default_factory=list)  # 사람이 읽을 진행 기록
     error: str = ""
+    # 진행 상황을 즉시 받아보고 싶은 쪽이 넘긴다. 끝난 뒤 lines를 훑으면
+    # 오래 걸리는 단계에서 아무 소식이 없어 멈춘 것처럼 보인다.
+    on_step: Callable[[str], None] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def say(self, msg: str) -> None:
         self.lines.append(msg)
+        if self.on_step is not None:
+            self.on_step(msg)
 
 
 def _run(args: list[str], cwd: Path) -> tuple[int, str]:
@@ -100,10 +108,13 @@ def _ensure_upstream(res: Result, root: Path, br: str) -> bool:
     return False
 
 
-def pull(cfg: Settings | None = None) -> Result:
+def pull(
+    cfg: Settings | None = None,
+    on_step: Callable[[str], None] | None = None,
+) -> Result:
     """원격 기록을 내려받는다. 읽기만 하므로 시작할 때 자동으로 불러도 안전하다."""
     cfg = cfg or settings
-    res = Result(ok=False)
+    res = Result(ok=False, on_step=on_step)
     root = cfg.project_root
 
     okay, why = available(cfg)
@@ -130,10 +141,14 @@ def pull(cfg: Settings | None = None) -> Result:
     return res
 
 
-def push(cfg: Settings | None = None, day: str | None = None) -> Result:
+def push(
+    cfg: Settings | None = None,
+    day: str | None = None,
+    on_step: Callable[[str], None] | None = None,
+) -> Result:
     """기록을 커밋하고 원격에 올린다. 커밋 → pull → push 순."""
     cfg = cfg or settings
-    res = Result(ok=False)
+    res = Result(ok=False, on_step=on_step)
     root = cfg.project_root
 
     okay, why = available(cfg)
@@ -180,11 +195,13 @@ def push(cfg: Settings | None = None, day: str | None = None) -> Result:
 
     had_upstream = _ensure_upstream(res, root, br)
 
+    res.say("원격 변경을 받는 중…")
     code, out = _run(["pull", "--rebase", "origin", br], root)
     if code != 0:
         res.error = out.splitlines()[-1] if out else "pull에 실패했습니다."
         return res
 
+    res.say("올리는 중…")
     args = ["push", "-u", "origin", br] if not had_upstream else ["push", "origin", br]
     code, out = _run(args, root)
     if code != 0:

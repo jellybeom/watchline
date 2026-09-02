@@ -5,7 +5,17 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QObject, QPointF, QProcess, QRect, Qt
+from PySide6.QtCore import (
+    QDate,
+    QEvent,
+    QObject,
+    QPointF,
+    QProcess,
+    QRect,
+    Qt,
+    QThread,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -41,7 +51,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import gitsync, hlines, kospi, names, tagstore, watchlist
-from .config import settings
+from .config import Settings, settings
 from .conflict_dialog import ConflictDialog
 from .kospi_dialog import KospiDialog
 
@@ -285,6 +295,29 @@ class Table(QTableWidget):
 # ────────────────────────────── 메인 창 ──────────────────────────────
 
 
+class SyncWorker(QObject):
+    """git 동기화를 작업 스레드에서 돌린다.
+
+    push()는 명령을 여러 번 순서대로 돌리고 그중 pull/push는 네트워크를
+    탄다. GUI 스레드에서 부르면 그 동안 창이 통째로 얼어붙으므로 여기로
+    옮긴다. 위젯은 절대 건드리지 않고 신호만 보낸다.
+    """
+
+    step = Signal(str)  # 진행 한 줄
+    done = Signal(object)  # gitsync.Result
+
+    def __init__(self, cfg: Settings):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self) -> None:
+        try:
+            res = gitsync.push(self.cfg, on_step=self.step.emit)
+        except Exception as e:  # 스레드에서 터지면 창이 영영 잠긴다
+            res = gitsync.Result(ok=False, error=f"{type(e).__name__}: {e}")
+        self.done.emit(res)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, initial: str | None = None):
         super().__init__()
@@ -302,6 +335,9 @@ class MainWindow(QMainWindow):
         self.store = tagstore.TagStore()
         self.market_tag_set = {self.cfg.tag_market_up, self.cfg.tag_market_down}
         self.sync_ready, self.sync_why = gitsync.available(self.cfg)
+        self.sync_thread: QThread | None = None  # 동기화 중이면 살아 있다
+        self.sync_worker: SyncWorker | None = None
+        self._locked: list[QAction] = []  # 잠그기 전에 켜져 있던 액션
         self.pending: set[str] = set()  # 기록이 갱신될 예정인 종목
         self.cols: list[str] = []
         self.tag_buffer: list[str] | None = None
@@ -471,6 +507,9 @@ class MainWindow(QMainWindow):
 
     def dragEnterEvent(self, event):  # noqa: N802
         paths = self._dropped_csv(event)
+        if self.syncing:
+            event.ignore()
+            return
         if paths:
             event.acceptProposedAction()
             self.update_overlay(dragging=True, count=len(paths))
@@ -487,6 +526,9 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event):  # noqa: N802
         paths = self._dropped_csv(event)
         self.update_overlay()
+        if self.syncing:
+            event.ignore()  # 툴바와 달리 액션이 아니라 따로 막아야 한다
+            return
         if paths:
             event.acceptProposedAction()
             self.open_files(paths)
@@ -751,22 +793,76 @@ class MainWindow(QMainWindow):
             else "올릴 기록이 없습니다 (Ctrl+U)"
         )
 
+    @property
+    def syncing(self) -> bool:
+        return self.sync_thread is not None
+
+    def lock_ui(self) -> None:
+        """동기화 중에는 툴바 전체를 잠근다.
+
+        기록 파일을 읽거나 쓰는 버튼만 골라 잠그는 방법도 있지만, 어느
+        것이 안전한지 판단이 갈리는 순간 데이터가 깨진다. rebase는 작업
+        폴더의 파일을 다시 쓰므로 몇 초 못 누르는 쪽이 훨씬 싸다.
+        표 편집은 메모리에만 남으므로 막지 않는다.
+        """
+        self._locked = [
+            a for a in self.toolbar.actions() if a.isEnabled() and not a.isSeparator()
+        ]
+        for a in self._locked:
+            a.setEnabled(False)
+
+    def unlock_ui(self) -> None:
+        for a in self._locked:
+            a.setEnabled(True)
+        self._locked = []
+
     def on_sync(self) -> None:
+        if self.syncing:
+            return  # 이미 돌고 있다
         if not self.sync_ready:
             QMessageBox.warning(self, "기록 동기화", self.sync_why)
             return
-        res = gitsync.push(self.cfg)
+
+        self.lock_ui()
+        self.act_sync.setText("동기화 중…")
         self.say("")
-        for line in res.lines:
-            self.say(f"[동기화] {line}")
+        self.say("[동기화] 시작합니다…")
+
+        thread = QThread(self)
+        worker = SyncWorker(self.cfg)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.step.connect(self.on_sync_step)
+        worker.done.connect(self.on_sync_done)
+        # 워커는 스레드가 끝난 뒤에 지운다. 순서가 바뀌면 신호가 끊긴다.
+        worker.done.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        self.sync_thread = thread
+        self.sync_worker = worker
+        thread.start()
+
+    def on_sync_step(self, line: str) -> None:
+        self.say(f"[동기화] {line}")
+
+    def on_sync_done(self, res) -> None:
         if res.ok:
             self.say("[동기화] 완료되었습니다.")
         else:
             self.say(f"[동기화] 실패 — {res.error}")
+
+        thread, self.sync_thread = self.sync_thread, None
+        if thread is not None:
+            thread.quit()
+            thread.wait()
+            thread.deleteLater()
+        self.sync_worker = None
+
+        self.unlock_ui()
+        self.update_sync_action()
+        if not res.ok:
             QMessageBox.warning(
                 self, "기록 동기화", f"올리지 못했습니다.\n\n{res.error}"
             )
-        self.update_sync_action()
 
     def apply_tag_store(self, ask: bool = True) -> None:
         """기록과 대조해 기준봉·태그를 정한다. 기준봉 확정이 먼저다."""
@@ -939,6 +1035,14 @@ class MainWindow(QMainWindow):
         self.update_status()
 
     def closeEvent(self, event):  # noqa: N802
+        if self.syncing:
+            # rebase 도중 프로세스를 끊으면 저장소가 어중간한 상태로 남는다.
+            QMessageBox.information(
+                self, "기록 동기화", "동기화가 진행 중입니다. 끝난 뒤 닫아주세요."
+            )
+            event.ignore()
+            return
+
         if (
             self.dirty
             and QMessageBox.question(
