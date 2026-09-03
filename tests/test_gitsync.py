@@ -50,6 +50,7 @@ def repo(tmp_path):
         project_root=work,
         kospi_file=work / "kospi.json",
         tag_store_file=work / "stock_tags.json",
+        names_file=work / "names.json",
     )
 
 
@@ -197,3 +198,75 @@ def test_pull_reports_error_outside_repo(tmp_path):
     (tmp_path / "nowhere").mkdir()
     res = gitsync.pull(cfg)
     assert not res.ok and res.error
+
+
+# ────────────────────────── names.json 동기화 ──────────────────────────
+
+
+def test_names_cache_is_a_tracked_record():
+    """TRACKED에서 빠지면 아래 상황들이 전부 어긋난다."""
+    assert "names.json" in gitsync.TRACKED
+
+
+def test_modified_names_cache_does_not_block_push(repo):
+    """실제로 보고된 증상의 재현.
+
+    names.json이 git에 커밋돼 있는데 gitsync의 TRACKED에는 없으면,
+    파일이 바뀌는 순간 gitsync가 커밋해주지도 않으면서 '기록 외 변경'으로
+    보고 동기화를 막았다. 새 관심종목을 받은 날마다 터지던 문제다.
+    """
+    repo.names_file.write_text('{"005930":"삼성전자"}', encoding="utf-8")
+    run(["add", "names.json"], repo.project_root)
+    run(["commit", "-qm", "add names"], repo.project_root)
+
+    # 새 종목이 늘어 캐시가 갱신된 상황
+    repo.names_file.write_text(
+        '{"005930":"삼성전자","028670":"팬오션"}', encoding="utf-8"
+    )
+    repo.kospi_file.write_text('{"2026-09-04":"up"}', encoding="utf-8")
+
+    res = gitsync.push(repo, day="2026-09-04")
+    assert res.ok, res.error
+    assert gitsync.pending_count(repo) == 0
+
+
+def test_new_names_cache_is_committed(repo):
+    """처음 생긴 캐시도 커밋 대상에 들어간다."""
+    repo.names_file.write_text('{"028670":"팬오션"}', encoding="utf-8")
+    assert gitsync.push(repo, day="2026-09-04").ok
+    assert gitsync.pending_count(repo) == 0
+
+
+def test_names_cache_counts_as_pending(repo):
+    """버튼의 (n) 표시에도 잡혀야 한다."""
+    assert gitsync.pending_count(repo) == 0
+    repo.names_file.write_text('{"005930":"삼성전자"}', encoding="utf-8")
+    assert gitsync.pending_count(repo) == 1
+
+
+def test_names_cache_reaches_the_remote(tmp_path, repo):
+    """다른 PC에서 CSV를 열지 않아도 종목명을 받을 수 있어야 한다."""
+    repo.names_file.write_text('{"028670":"팬오션"}', encoding="utf-8")
+    assert gitsync.push(repo, day="2026-09-04").ok
+
+    other = tmp_path / "other3"
+    subprocess.run(
+        ["git", "clone", "-q", str(tmp_path / "remote"), str(other)],
+        capture_output=True,
+        check=False,
+    )
+    assert "팬오션" in (other / "names.json").read_text(encoding="utf-8")
+
+
+def test_other_tracked_file_still_blocks_push(repo):
+    """names.json을 허용했다고 아무 파일이나 통과하면 안 된다."""
+    memo = repo.project_root / "메모.txt"
+    memo.write_text("처음", encoding="utf-8")
+    run(["add", "메모.txt"], repo.project_root)
+    run(["commit", "-qm", "add memo"], repo.project_root)
+    memo.write_text("고침", encoding="utf-8")
+
+    repo.kospi_file.write_text('{"2026-09-04":"up"}', encoding="utf-8")
+    res = gitsync.push(repo, day="2026-09-04")
+    assert not res.ok
+    assert "커밋하지 않은 변경" in res.error

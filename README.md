@@ -113,7 +113,7 @@ uv run watchline-hud     # 터미널에서 직접
 
 ### 기록 동기화
 
-`kospi.json`과 `stock_tags.json`을 커밋하고 원격에 올립니다. 툴바의
+`kospi.json`, `stock_tags.json`, `names.json`을 커밋하고 원격에 올립니다. 툴바의
 '기록 동기화'(`Ctrl+U`)를 누르면 되고, 올릴 것이 있으면 버튼에 건수가
 `기록 동기화 (2)`처럼 표시됩니다.
 
@@ -166,7 +166,7 @@ push를 한 번에 처리합니다. 올릴 것이 있으면 버튼에 개수가 
 프로그램이 뜨지 않는 상황이라면 터미널에서 직접 처리할 수 있습니다.
 
 ```powershell
-git add kospi.json stock_tags.json
+git add kospi.json stock_tags.json names.json
 git commit -m "data: 2026-08-18 기록 갱신"
 git pull --rebase
 git push
@@ -376,7 +376,7 @@ watchline/
 ├── tags.txt             태그 목록 (수정 가능)
 ├── kospi.json           KOSPI 일별 장 구분 기록
 ├── stock_tags.json      종목별 기준봉·태그 기록
-├── names.json           종목코드↔종목명 캐시 (HUD 표시용)
+├── names.json           종목코드↔종목명 캐시 (HUD 표시용, 함께 동기화)
 ├── watchline/
 │   ├── config.py        경로와 판정 기준
 │   ├── icon.ico         앱 아이콘 (원본: icon.svg)

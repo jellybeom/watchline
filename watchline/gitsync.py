@@ -17,7 +17,10 @@ from pathlib import Path
 
 from .config import Settings, settings
 
-TRACKED = ("kospi.json", "stock_tags.json")
+# 동기화 대상. names.json은 캐시지만 여기 넣는다. 빼두면 git이 낯선
+# 파일로 보고 rebase 직전 검사에서 동기화를 막고, PC마다 CSV를 한 번씩
+# 열기 전에는 HUD에 종목명이 뜨지 않는다.
+TRACKED = ("kospi.json", "stock_tags.json", "names.json")
 TIMEOUT = 60
 
 
