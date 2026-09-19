@@ -405,6 +405,7 @@ watchline/
     ├── test_hud_source.py  작도 파일 선택
     ├── test_hud_window.py  HUD 창 (offscreen 렌더링)
     ├── test_sync_async.py  동기화 스레드와 UI 잠금
+    ├── test_discard_originals.py  저장 후 원본 정리
     └── test_readme.py    이 문서와 실제 파일 구성의 일치
 ```
 
