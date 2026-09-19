@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QToolBar,
     QWidget,
 )
+from send2trash import send2trash
 
 from . import gitsync, hlines, kospi, names, tagstore, watchlist
 from .config import Settings, settings
@@ -329,6 +330,8 @@ class MainWindow(QMainWindow):
         self.cfg = settings
         self.data: watchlist.Watchlist | None = None
         self.sources: list[Path] = []  # 합쳐진 입력 파일들
+        # 저장 뒤 지워도 되는 원본. 저장 결과물은 여기에 들어가지 않는다.
+        self.originals: list[Path] = []
         self.extract: hlines.ExtractResult | None = None
         self.tags: list[str] = watchlist.load_tags(self.cfg.tags_file)
         self.market = kospi.MarketLog()
@@ -643,6 +646,7 @@ class MainWindow(QMainWindow):
         if not append:
             self.data = None
             self.sources = []
+            self.originals = []
 
         for path in paths:
             self.load_into(path)
@@ -702,6 +706,7 @@ class MainWindow(QMainWindow):
             self.dirty = True
 
         self.sources.append(Path(path))
+        self.originals.append(Path(path))
         return True
 
     def on_reset(self) -> None:
@@ -710,6 +715,7 @@ class MainWindow(QMainWindow):
             return
         self.data = None
         self.sources = []
+        self.originals = []
         self.pending = set()
         self.dirty = False
         self.table.clear()
@@ -1029,10 +1035,70 @@ class MainWindow(QMainWindow):
             self.update_sync_action()
 
         self.say(f"[저장] {saved}  ({len(self.data.rows)}종목)")
+        self.discard_originals(saved)
         self.sources = [saved]
         self.dirty = False
         self.refresh_title()
         self.update_status()
+
+    def discard_originals(self, saved: Path) -> None:
+        """저장이 끝난 뒤 원본 입력 파일을 휴지통으로 보낸다.
+
+        입력 N개를 합쳐 열을 덧붙인 결과가 새 파일 하나이므로, 원본이
+        그대로 남으면 같은 종목 목록이 두 벌이 된다. 다만 실제 매매에
+        쓰는 데이터라 되돌릴 수 없게 지우지는 않는다.
+        """
+        target = Path(saved).resolve()
+        victims: list[Path] = []
+        for path in self.originals:
+            try:
+                # 입력 파일에 덮어쓰기로 저장했다면 그건 방금 만든 결과물이다.
+                if path.resolve() == target or not path.is_file():
+                    continue
+            except OSError:
+                continue
+            victims.append(path)
+        if not victims:
+            return
+
+        shown = "\n".join(f"  {v.name}" for v in victims[:8])
+        if len(victims) > 8:
+            shown += f"\n  … 외 {len(victims) - 8}개"
+        answer = QMessageBox.question(
+            self,
+            "원본 파일 삭제",
+            f"저장한 파일에 이미 합쳐진 원본 {len(victims)}개가 있습니다.\n"
+            f"{shown}\n\n"
+            "휴지통으로 보낼까요? (휴지통에서 되돌릴 수 있습니다)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,  # 실수로 엔터를 쳐도 지워지지 않게
+        )
+        if answer != QMessageBox.Yes:
+            self.say(f"[원본] {len(victims)}개를 그대로 두었습니다.")
+            return
+
+        failed: list[tuple[Path, str]] = []
+        for path in victims:
+            try:
+                send2trash(str(path))
+            except Exception as e:  # 엑셀이 잡고 있으면 권한 오류가 난다
+                failed.append((path, f"{type(e).__name__}: {e}"))
+            else:
+                self.originals.remove(path)
+
+        done = len(victims) - len(failed)
+        if done:
+            self.say(f"[원본] {done}개를 휴지통으로 보냈습니다.")
+        if failed:
+            for path, why in failed:
+                self.say(f"[원본] 삭제 실패 — {path.name}: {why}")
+            QMessageBox.warning(
+                self,
+                "원본 삭제 실패",
+                f"저장은 끝났습니다. {len(failed)}개를 지우지 못했습니다.\n"
+                "다른 프로그램이 열고 있는지 확인하세요.\n\n"
+                + "\n".join(f"  {p.name}" for p, _ in failed[:8]),
+            )
 
     def closeEvent(self, event):  # noqa: N802
         if self.syncing:
