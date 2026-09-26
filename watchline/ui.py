@@ -419,6 +419,14 @@ class MainWindow(QMainWindow):
         self.act_sync = act(
             "기록 동기화", "Ctrl+U", self.on_sync, "기록을 커밋하고 원격에 올립니다"
         )
+        # 되돌리기는 복구가 안 되므로 단축키를 주지 않는다. 손이 미끄러져
+        # 눌리는 경로를 하나라도 줄인다.
+        self.act_revert = act(
+            "기록 되돌리기",
+            None,
+            self.on_revert,
+            "올리지 않은 기록을 버리고 마지막 동기화 상태로 되돌립니다",
+        )
 
         self.table = Table()
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
@@ -869,6 +877,100 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, "기록 동기화", f"올리지 못했습니다.\n\n{res.error}"
             )
+
+    # ───────────────────────── 기록 되돌리기 ─────────────────────────
+
+    def on_revert(self) -> None:
+        """기록 파일만 원격 상태로 되돌린다.
+
+        복구가 안 되는 동작이라 '몇 건'이 아니라 어느 파일이 몇 줄 바뀌는지
+        먼저 보여주고 확인을 받는다.
+        """
+        if self.syncing:
+            return
+
+        plan = self._revert_plan()
+        if plan is None:
+            return
+
+        if (
+            QMessageBox.question(
+                self,
+                "기록 되돌리기",
+                self._revert_prompt(plan),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,  # 실수로 엔터를 쳐도 되돌아가지 않게
+            )
+            != QMessageBox.Yes
+        ):
+            self.say("[되돌리기] 취소했습니다.")
+            return
+
+        res = self._busy(lambda: gitsync.revert(self.cfg, on_step=self.on_revert_step))
+        if not res.ok:
+            self.say(f"[되돌리기] 실패 — {res.error}")
+            QMessageBox.warning(
+                self, "기록 되돌리기", f"되돌리지 못했습니다.\n\n{res.error}"
+            )
+            return
+
+        self.reload_store()
+        self.reload_market()
+        self.update_sync_action()
+        self.say("[되돌리기] 완료되었습니다.")
+        if self.data:
+            # 표는 되돌리기 전 기록으로 채워져 있다. 자동으로 다시 대조하면
+            # 편집 중인 값을 말없이 덮어쓰므로 안내만 한다.
+            self.say("           표에 반영하려면 '↻ 기준봉·태그'를 누르세요.")
+
+    def _revert_plan(self):
+        """되돌릴 것이 있으면 계획을, 없거나 불가능하면 None을 준다."""
+        self.say("")
+        self.say("[되돌리기] 원격 상태를 확인하는 중…")
+        plan, why = self._busy(lambda: gitsync.plan_revert(self.cfg))
+        if plan is None:
+            self.say(f"[되돌리기] 사용할 수 없습니다 — {why}")
+            QMessageBox.warning(self, "기록 되돌리기", why)
+            return None
+        if plan.empty:
+            self.say("[되돌리기] 되돌릴 기록이 없습니다.")
+            QMessageBox.information(
+                self, "기록 되돌리기", "올리지 않은 기록 변경이 없습니다."
+            )
+            return None
+        return plan
+
+    def _busy(self, job):
+        """git을 부르는 동안 툴바를 잠그고 대기 커서를 씌운다.
+
+        동기화와 달리 스레드로 옮기지 않는다. 일부러 누르는 드문 동작이고
+        확인창 앞뒤로만 잠깐 멈추므로, 스레드를 하나 더 두는 복잡함이
+        얻는 것보다 크다.
+        """
+        self.lock_ui()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            QApplication.processEvents()  # 직전에 남긴 문구가 실제로 그려지도록
+            return job()
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.unlock_ui()
+
+    def on_revert_step(self, line: str) -> None:
+        self.say(f"[되돌리기] {line}")
+
+    def _revert_prompt(self, plan) -> str:
+        rows = "\n".join(
+            f"  {name}  +{added} −{removed} 줄" for name, added, removed in plan.changes
+        )
+        text = f"올리지 않은 기록을 버리고 {plan.ref} 상태로 되돌립니다.\n\n{rows}\n"
+        if plan.unpushed:
+            text += f"\n올리지 않은 커밋 {plan.unpushed}개도 함께 되돌립니다.\n"
+        if plan.missing:
+            text += "\n원격에 없어 그대로 두는 파일: " + ", ".join(plan.missing) + "\n"
+        if not plan.fetched:
+            text += "\n원격을 받아오지 못해 마지막으로 알던 상태를 기준으로 합니다.\n"
+        return text + "\n되돌린 뒤에는 복구할 수 없습니다. 계속할까요?"
 
     def apply_tag_store(self, ask: bool = True) -> None:
         """기록과 대조해 기준봉·태그를 정한다. 기준봉 확정이 먼저다."""

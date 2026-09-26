@@ -214,3 +214,112 @@ def push(
     res.ok = True
     res.say("이미 최신입니다." if "up-to-date" in out.lower() else "원격에 올렸습니다.")
     return res
+
+
+@dataclass
+class RevertPlan:
+    """되돌리기 전에 무엇이 바뀌는지 보여주기 위한 미리보기."""
+
+    ref: str  # 기준으로 삼을 원격 브랜치 (origin/master 등)
+    changes: list[tuple[str, int, int]] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)  # 원격에 없는 기록 파일
+    fetched: bool = True  # 원격을 새로 받아왔는지
+    unpushed: int = 0  # 올리지 않은 커밋 수
+
+    @property
+    def empty(self) -> bool:
+        return not self.changes
+
+
+def plan_revert(cfg: Settings | None = None) -> tuple[RevertPlan | None, str]:
+    """되돌리면 어떤 기록이 어떻게 바뀌는지 미리 계산한다.
+
+    되돌리기는 복구가 안 되므로 확인을 받기 전에 사용자가 무엇을 잃는지
+    구체적으로 볼 수 있어야 한다. 반환은 (계획, 오류) 중 한쪽만 채워진다.
+    """
+    cfg = cfg or settings
+    ok, why = available(cfg)
+    if not ok:
+        return None, why
+
+    root = cfg.project_root
+    br = branch(cfg)
+    if not br:
+        return None, "현재 브랜치를 알 수 없습니다."
+
+    # 원격에 못 닿아도 마지막으로 받아둔 상태로는 되돌릴 수 있다.
+    fetched = _run(["fetch", "origin", br], root)[0] == 0
+    ref = f"origin/{br}"
+    if _run(["rev-parse", "--verify", "--quiet", ref], root)[0] != 0:
+        return None, f"{ref}를 찾을 수 없습니다. 한 번은 올린 뒤에 쓸 수 있습니다."
+
+    changes: list[tuple[str, int, int]] = []
+    code, out = _run(["diff", "--numstat", ref, "--", *TRACKED], root)
+    if code == 0:
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 3:
+                continue
+            added, removed, name = parts
+            # 바이너리는 숫자 대신 '-'로 나온다. 기록은 텍스트지만 방어한다.
+            changes.append(
+                (
+                    name,
+                    int(added) if added.isdigit() else 0,
+                    int(removed) if removed.isdigit() else 0,
+                )
+            )
+
+    missing = [
+        n
+        for n in TRACKED
+        if (root / n).exists() and _run(["cat-file", "-e", f"{ref}:{n}"], root)[0] != 0
+    ]
+    unpushed = len(_run(["log", "--oneline", f"{ref}..HEAD"], root)[1].splitlines())
+    return RevertPlan(ref, changes, missing, fetched, unpushed), ""
+
+
+def revert(
+    cfg: Settings | None = None,
+    on_step: Callable[[str], None] | None = None,
+) -> Result:
+    """기록 파일만 원격 상태로 되돌린다.
+
+    reset --hard를 쓰지 않는다. 코드 변경까지 날아가고, 이력을 다시 쓰면
+    다른 PC에서 rebase가 꼬인다. 기록 파일만 골라 원격 내용으로 덮어쓰고,
+    올리지 않은 커밋이 있으면 되돌린 상태를 새 커밋으로 남긴다.
+    """
+    res = Result(ok=False, on_step=on_step)
+    plan, why = plan_revert(cfg)
+    if plan is None:
+        res.error = why
+        return res
+
+    cfg = cfg or settings
+    root = cfg.project_root
+    if not plan.fetched:
+        res.say("원격을 받아오지 못해 마지막으로 알던 상태로 되돌립니다.")
+    if plan.empty:
+        res.ok = True
+        res.say("되돌릴 기록이 없습니다.")
+        return res
+
+    names = [n for n, _, _ in plan.changes]
+    res.say(f"{plan.ref} 상태로 되돌리는 중…")
+    code, out = _run(["checkout", plan.ref, "--", *names], root)
+    if code != 0:
+        res.error = out.splitlines()[-1] if out else "되돌리지 못했습니다."
+        return res
+    res.say(f"기록 {len(names)}개를 되돌렸습니다 — {', '.join(names)}")
+
+    # checkout은 색인까지 바꾼다. 올리지 않은 커밋이 있었다면 그 되돌림을
+    # 커밋으로 남겨야 HEAD의 내용도 원격과 같아진다.
+    if _run(["diff", "--cached", "--quiet", "--", *names], root)[0] != 0:
+        code, out = _run(["commit", "-m", "data: 기록 되돌림", "--", *names], root)
+        if code != 0:
+            res.error = out.splitlines()[-1] if out else "되돌림을 기록하지 못했습니다."
+            return res
+        res.say("되돌린 상태를 커밋했습니다.")
+
+    res.ok = True
+    return res
